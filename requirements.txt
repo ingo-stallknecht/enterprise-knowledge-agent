@@ -20,3 +20,8 @@ apscheduler==3.10.4
 httpx==0.27.2
 pytest==8.1.1
 python-slugify==8.0.4
+python-multipart==0.0.9
+streamlit==1.38.0
+openai>=1.40.0
+tiktoken>=0.7.0
+python-dotenv>=1.0.1

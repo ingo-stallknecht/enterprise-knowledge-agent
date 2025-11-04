@@ -1,43 +1,30 @@
 project_name: enterprise-knowledge-agent
-seed: 42
 
-
-# RAG
 chunk:
-max_chars: 1200
-overlap: 120
-min_chars: 200
-
+  max_chars: 1200
+  overlap: 120
+  min_chars: 200
 
 retrieval:
-embedder_model: sentence-transformers/all-MiniLM-L6-v2
-normalize: true
-faiss_index: data/index/handbook.index
-store_json: data/index/docstore.json
-top_k: 6
-
+  embedder_model: sentence-transformers/all-MiniLM-L6-v2
+  normalize: true
+  faiss_index: data/index/handbook.index
+  store_json: data/index/docstore.json
+  top_k: 6
 
 answer:
-strategy: summarization
-model_name: sshleifer/distilbart-cnn-12-6
-max_tokens: 256
+  strategy: extractive
+  model_name: sshleifer/distilbart-cnn-12-6
+  max_tokens: 256
 
-
-# Evaluation & Promotion
 eval:
-questions_path: configs/eval_questions.jsonl
-k: 6
-pass_thresholds:
-recall_at_k: 0.72
-answer_contains_gold_frac: 0.55
-
+  questions_path: configs/eval_questions.jsonl
+  k: 6
+  pass_thresholds:
+    recall_at_k: 0.72
+    answer_contains_gold_frac: 0.55
 
 mlflow:
-tracking_uri: file:./mlflow_artifacts
-experiment: EnterpriseKnowledgeAgent
-registered_model: EKA_RAG_Index
-
-
-airflow:
-schedule_cron: "0 6 * * 1" # every Monday 06:00 local
-owner: eka
+  tracking_uri: file:./mlflow_artifacts
+  experiment: EnterpriseKnowledgeAgent
+  registered_model: EKA_RAG_Index

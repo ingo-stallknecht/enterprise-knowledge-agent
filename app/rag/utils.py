@@ -1,38 +1,42 @@
 # app/rag/utils.py
-import os, pathlib, yaml
-from mlflow.tracking import MlflowClient
-
-
-def load_cfg(path: str = "configs/settings.yaml"):
-with open(path, "r") as f:
-return yaml.safe_load(f)
-
+import os
+import yaml
+import pathlib
+from typing import Dict
 
 def ensure_dirs():
-for p in [
-pathlib.Path("data/raw"),
-pathlib.Path("data/processed"),
-pathlib.Path("data/processed/wiki"),
-pathlib.Path("data/index"),
-pathlib.Path("models"),
-pathlib.Path("mlflow_artifacts"),
-]:
-p.mkdir(parents=True, exist_ok=True)
+    """Ensure key data directories exist."""
+    for d in ["data/raw", "data/processed", "data/index", "mlflow_artifacts"]:
+        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
 
+def load_cfg(path: str) -> dict:
+    """Load YAML config file."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Config not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-def mlflow_client():
-from mlflow import set_tracking_uri
-uri = os.getenv("MLFLOW_TRACKING_URI", "file:./mlflow_artifacts")
-set_tracking_uri(uri)
-return MlflowClient()
+def get_production_index_paths(model_name: str) -> Dict[str, str]:
+    """
+    Check MLflow registry for a Production model version and return its artifact paths.
+    Works gracefully even if MLflow or the registry is not available.
+    """
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
 
-
-def get_production_index_paths(model_name: str):
-client = mlflow_client()
-versions = client.search_model_versions(f"name='{model_name}'")
-prod = [v for v in versions if v.current_stage == "Production"]
-if not prod:
-return None
-v = prod[0]
-idx = v.tags.get("index_path"); store = v.tags.get("store_path")
-return {"index_path": idx, "store_path": store, "version": v.version}
+        client = MlflowClient()
+        versions = client.search_model_versions(f"name='{model_name}'")
+        prod = [v for v in versions if v.current_stage == "Production"]
+        if not prod:
+            return {}
+        latest = sorted(prod, key=lambda v: int(v.version))[-1]
+        run_id = latest.run_id
+        artifact_uri = client.get_run(run_id).info.artifact_uri
+        base = artifact_uri.replace("file://", "")
+        return {
+            "index_path": os.path.join(base, "handbook.index"),
+            "store_path": os.path.join(base, "docstore.json"),
+        }
+    except Exception:
+        return {}

@@ -1,48 +1,63 @@
-.PHONY: init api airflow mlflow pipeline index ingest eval promote rollback test fmt
+# Enterprise Knowledge Agent — Cross-platform Makefile (robust venv detection)
 
+.SILENT:
+.ONESHELL:
+SHELL := /usr/bin/sh
+
+.PHONY: init api airflow mlflow pipeline index ingest eval promote rollback test fmt test-api ui print-which
+
+# Resolve venv executables (Windows Git Bash vs Unix)
+PYTHON := $(shell if [ -f .venv/Scripts/python.exe ]; then printf ".venv/Scripts/python.exe"; \
+                   elif [ -f .venv/bin/python ]; then printf ".venv/bin/python"; \
+                   else printf "python"; fi)
+STREAMLIT := $(shell if [ -f .venv/Scripts/streamlit.exe ]; then printf ".venv/Scripts/streamlit.exe"; \
+                      elif [ -f .venv/bin/streamlit ]; then printf ".venv/bin/streamlit"; \
+                      else printf "streamlit"; fi)
+
+print-which:
+	@echo "PYTHON=$(PYTHON)"
+	@echo "STREAMLIT=$(STREAMLIT)"
 
 init:
-python -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements.txt
-
+	python -m venv .venv && \
+	python -m pip install --upgrade pip && \
+	python -m pip install -r requirements.txt
 
 api:
-. .venv/bin/activate && uvicorn app.server:app --reload --port 8000
-
+	"$(PYTHON)" -m uvicorn app.server:app --reload --port 8000
 
 airflow:
-docker compose up airflow-init -d; docker compose up airflow-webserver airflow-scheduler -d
-
+	docker compose up airflow-init -d && \
+	docker compose up airflow-webserver airflow-scheduler -d
 
 mlflow:
-bash mlflow/start_mlflow.sh
-
+	bash mlflow/start_mlflow.sh
 
 ingest:
-. .venv/bin/activate && python scripts/fetch_gitlab_handbook.py
-
+	"$(PYTHON)" scripts/fetch_gitlab_handbook.py
 
 index:
-. .venv/bin/activate && python scripts/build_index.py
-
+	"$(PYTHON)" -m scripts.build_index
 
 eval:
-. .venv/bin/activate && python scripts/eval_rag.py
-
+	"$(PYTHON)" scripts/eval_rag.py
 
 promote:
-. .venv/bin/activate && python scripts/promote_or_rollback.py --mode promote
-
+	"$(PYTHON)" scripts/promote_or_rollback.py --mode promote
 
 rollback:
-. .venv/bin/activate && python scripts/promote_or_rollback.py --mode rollback
-
+	"$(PYTHON)" scripts/promote_or_rollback.py --mode rollback
 
 pipeline: ingest index eval promote
 
-
 test:
-. .venv/bin/activate && pytest -q
-
+	"$(PYTHON)" -m pytest -q
 
 fmt:
-. .venv/bin/activate && python -m nltk.downloader punkt
+	"$(PYTHON)" -m nltk.downloader punkt
+
+test-api:
+	"$(PYTHON)" scripts/test_api_local.py
+
+ui:
+	"$(STREAMLIT)" run app/streamlit_app.py

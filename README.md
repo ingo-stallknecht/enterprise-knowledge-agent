@@ -1,0 +1,22 @@
+# Enterprise Knowledge Agent (RAG + Actions, No‑Cloud)
+
+
+**What**: Local, production‑style RAG agent over GitLab Handbook with agent actions, Airflow weekly refresh, and MLflow‑gated promotion + rollback.
+
+
+## Features
+- RAG with FAISS + SentenceTransformers
+- Actions: `retrieve`, `answer_with_citations`, `upsert_wiki_page`, `create_ticket`
+- FastAPI server with OpenAPI docs
+- Airflow DAG for weekly ingest → index → eval → promote
+- MLflow metrics + model registry stages (Production, Archived)
+- Tests & Makefile
+- Fully local, cloud‑free
+
+
+## Quickstart
+```bash
+cp .env.example .env
+make init
+make pipeline
+make api # http://127.0.0.1:8000/docs

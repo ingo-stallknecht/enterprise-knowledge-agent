@@ -1,0 +1,46 @@
+version: "3.9"
+services:
+airflow-webserver:
+image: apache/airflow:2.9.2
+environment:
+- AIRFLOW__CORE__LOAD_EXAMPLES=False
+- AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+- AIRFLOW__CORE__EXECUTOR=LocalExecutor
+depends_on:
+- airflow-scheduler
+volumes:
+- ./airflow/dags:/opt/airflow/dags
+- ./:/repo
+ports:
+- "8080:8080"
+command: webserver
+
+
+airflow-scheduler:
+image: apache/airflow:2.9.2
+environment:
+- AIRFLOW__CORE__LOAD_EXAMPLES=False
+- AIRFLOW__CORE__EXECUTOR=LocalExecutor
+volumes:
+- ./airflow/dags:/opt/airflow/dags
+- ./:/repo
+command: scheduler
+
+
+airflow-init:
+image: apache/airflow:2.9.2
+entrypoint: /bin/bash
+command: -c "airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
+volumes:
+- ./airflow/dags:/opt/airflow/dags
+
+
+mlflow:
+image: ghcr.io/mlflow/mlflow:v2.14.3
+environment:
+- MLFLOW_TRACKING_URI=file:/repo/mlflow_artifacts
+volumes:
+- ./:/repo
+command: mlflow server --backend-store-uri file:/repo/mlflow_artifacts --default-artifact-root file:/repo/mlflow_artifacts --host 0.0.0.0 --port 5000
+ports:
+- "5000:5000"

@@ -5,33 +5,26 @@ import sys, os, pathlib, re, time, tempfile
 from typing import List, Dict, Tuple
 import streamlit as st
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) Writable cache sandbox for Streamlit Cloud (fixes HF PermissionError)
-# ──────────────────────────────────────────────────────────────────────────────
 def _secret(k, default=None):
     try:
         return st.secrets[k]
     except Exception:
         return os.environ.get(k, default)
 
-# Put EVERYTHING in /mount/tmp (writable), or OS tmp as fallback
+# --- Writable caches for HF & transformers (Streamlit Cloud safe) ---
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
 if not WRITABLE_BASE.exists():
     WRITABLE_BASE = pathlib.Path(tempfile.gettempdir()) / "eka"
 HF_CACHE = WRITABLE_BASE / "hf"
 DOTCACHE = WRITABLE_BASE / ".cache" / "huggingface"
 DOTHF = WRITABLE_BASE / ".huggingface"
-
 for p in (WRITABLE_BASE, HF_CACHE, DOTCACHE, DOTHF):
     try:
         p.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
-# Make ~ point into WRITABLE_BASE so any "~/.cache" reads are safe
 os.environ["HOME"] = str(WRITABLE_BASE)
-
-# Absolutely disable any token search on HF Hub & all telemetry
 os.environ["HF_HUB_DISABLE_TOKEN_SEARCH"] = "1"
 os.environ["HUGGING_FACE_HUB_TOKEN"] = ""
 os.environ["HF_TOKEN"] = ""
@@ -40,15 +33,11 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_CACHE_SYMLINKS"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-# Point every known cache var into our sandbox
 os.environ["HF_HOME"] = str(HF_CACHE)
 os.environ["TRANSFORMERS_CACHE"] = str(HF_CACHE)
 os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(HF_CACHE)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_CACHE)
 os.environ["XDG_CACHE_HOME"] = str(WRITABLE_BASE)
-
-# Create empty token files where HF might look (~/.cache/huggingface, ~/.huggingface, and HF_CACHE)
 for token_file in (HF_CACHE / "token", DOTCACHE / "token", DOTHF / "token"):
     try:
         token_file.parent.mkdir(parents=True, exist_ok=True)
@@ -56,9 +45,7 @@ for token_file in (HF_CACHE / "token", DOTCACHE / "token", DOTHF / "token"):
     except Exception:
         pass
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1) OpenAI & app settings (via Secrets)
-# ──────────────────────────────────────────────────────────────────────────────
+# LLM toggles
 os.environ["USE_OPENAI"] = _secret("USE_OPENAI", "true")
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
@@ -71,13 +58,12 @@ RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) Make sure "app" package is importable
-# ──────────────────────────────────────────────────────────────────────────────
+# Ensure the repo root (one level up) is importable
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Local imports
 from app.rag.utils import ensure_dirs, load_cfg
 from app.rag.embedder import Embedder
 from app.rag.index import DocIndex
@@ -85,9 +71,7 @@ from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) Config
-# ──────────────────────────────────────────────────────────────────────────────
+# --- Config & dirs ---
 CFG = {}
 cfg_path = pathlib.Path("configs/settings.yaml")
 if cfg_path.exists():
@@ -102,9 +86,7 @@ STORE_PATH = RET.get("store_json", "data/index/docstore.json")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
 ensure_dirs()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) UI basics
-# ──────────────────────────────────────────────────────────────────────────────
+# --- UI chrome ---
 st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
 st.markdown("""
 <style>
@@ -120,13 +102,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 5) Cached resources (models & index)
-# ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_models():
-    # Use a writable cache folder and never use a token
-    emb = Embedder(EMB_MODEL, NORMALIZE)  # Embedder internally pins cache & disables token
+    emb = Embedder(EMB_MODEL, NORMALIZE)
     rer = None
     if not DISABLE_RERANKER_BOOT:
         try:
@@ -139,9 +117,6 @@ def get_models():
 def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 6) Core helpers
-# ──────────────────────────────────────────────────────────────────────────────
 def _scan_processed_files() -> List[pathlib.Path]:
     return sorted(pathlib.Path("data/processed").glob("**/*.md"))
 
@@ -205,9 +180,6 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
             "retrieval_ms": int((time.time()-t0)*1000)}
     return top_records, reranked, meta
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 7) Context Visualizer
-# ──────────────────────────────────────────────────────────────────────────────
 _SENT_SPLIT = re.compile(r'(?<=[\.\?!])\s+(?=[A-Z0-9])')
 def _split_sentences(text: str) -> List[str]:
     t = (text or "").strip()
@@ -264,9 +236,6 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 8) UI with Ask / Agent / Upload / About
-# ──────────────────────────────────────────────────────────────────────────────
 st.markdown(
     "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
     "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external backend.</div></div>"
@@ -276,7 +245,6 @@ st.markdown(
 
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
-# --- Ask ---
 with tab_ask:
     st.markdown("**Answers from your local corpus (GitLab + uploads). Shows citations and sentence→source mapping.**")
     q = st.text_area("Your question", height=100, placeholder="e.g., How are values applied in performance reviews?")
@@ -317,7 +285,6 @@ with tab_ask:
                 with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"):
                     st.write(c['preview'])
 
-# --- Agent ---
 def agent_run(message: str, auto_actions: bool = False) -> Dict:
     trace: List[Dict] = []
     plan = ["rewrite_query", "retrieve", "draft", "critic"]
@@ -390,7 +357,6 @@ with tab_agent:
             if res.get("applied_actions"):
                 st.success(f"✅ Applied: {res['applied_actions']}")
 
-# --- Upload ---
 with tab_upload:
     st.markdown("**Upload `.md` or `.txt` — added to the knowledge base.**")
     f = st.file_uploader("Upload a file", type=["md","txt"])
@@ -408,7 +374,6 @@ with tab_upload:
             stats = rebuild_index(prog)
             st.success(f"✅ Indexed {stats['num_chunks']} chunks from {stats['num_files']} files.")
 
-# --- About ---
 with tab_about:
     st.markdown("""
 ### How this works (Streamlit-only)

@@ -1,33 +1,39 @@
 # app/rag/reranker.py
-import os
-import warnings
 from typing import List, Dict, Tuple
+import os
 
-# --- Quiet down tokenizers/transformers warnings (incl. clean_up_tokenization_spaces) ---
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 try:
-    from transformers.utils import logging as hf_logging
-    hf_logging.set_verbosity_error()
+    from sentence_transformers import CrossEncoder
 except Exception:
-    pass
-warnings.filterwarnings(
-    "ignore",
-    message=r"`clean_up_tokenization_spaces` was not set",
-    category=FutureWarning,
-    module=r".*transformers.*",
-)
-
-from sentence_transformers import CrossEncoder
+    CrossEncoder = None
 
 class Reranker:
+    """Cross-encoder reranker. Falls back if model unavailable."""
     def __init__(self, model_name: str):
-        # CrossEncoder internally uses Transformers; verbosity has been reduced above.
-        self.model = CrossEncoder(model_name, max_length=384)
+        self.model_name = model_name
+        self.model = None
+        if CrossEncoder:
+            try:
+                cache_dir = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+                self.model = CrossEncoder(
+                    model_name,
+                    cache_dir=cache_dir,        # CrossEncoder uses cache_dir
+                    use_auth_token=False,       # <- never read token
+                    trust_remote_code=False
+                )
+            except Exception:
+                self.model = None
 
-    def rerank(self, query: str, candidates: List[Dict], top_k: int) -> List[Tuple[Dict, float]]:
-        pairs = [(query, c.get("text", "")) for c in candidates]
-        if not pairs:
+    def rerank(self, query: str, candidates: List[Dict], top_k: int = 6) -> List[Tuple[Dict, float]]:
+        if not candidates:
             return []
-        scores = self.model.predict(pairs, convert_to_numpy=True)
-        order = scores.argsort()[::-1][:top_k]
-        return [(candidates[i], float(scores[i])) for i in order]
+        if not self.model:
+            # heuristic fallback
+            scored = [(c, float(min(len((c.get("text") or "")), 1000)) / 1000.0)) for c in candidates]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored[:top_k]
+        pairs = [(query, (c.get("text") or "")) for c in candidates]
+        scores = self.model.predict(pairs, batch_size=32, show_progress_bar=False)
+        scored = list(zip(candidates, [float(s) for s in scores]))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]

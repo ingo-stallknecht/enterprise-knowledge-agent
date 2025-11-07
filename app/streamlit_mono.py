@@ -14,8 +14,10 @@ def _secret(k, default=None):
     except Exception:
         return os.environ.get(k, default)
 
-# Put EVERYTHING in /mount/tmp (writable)
-WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", tempfile.gettempdir())) / "eka"
+# Put EVERYTHING in /mount/tmp (writable), or OS tmp as fallback
+WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
+if not WRITABLE_BASE.exists():
+    WRITABLE_BASE = pathlib.Path(tempfile.gettempdir()) / "eka"
 HF_CACHE = WRITABLE_BASE / "hf"
 DOTCACHE = WRITABLE_BASE / ".cache" / "huggingface"
 DOTHF = WRITABLE_BASE / ".huggingface"
@@ -29,7 +31,8 @@ for p in (WRITABLE_BASE, HF_CACHE, DOTCACHE, DOTHF):
 # Make ~ point into WRITABLE_BASE so any "~/.cache" reads are safe
 os.environ["HOME"] = str(WRITABLE_BASE)
 
-# Disable token lookups & telemetry and force all caches to writable tmp
+# Absolutely disable any token search on HF Hub & all telemetry
+os.environ["HF_HUB_DISABLE_TOKEN_SEARCH"] = "1"
 os.environ["HUGGING_FACE_HUB_TOKEN"] = ""
 os.environ["HF_TOKEN"] = ""
 os.environ["HUGGINGFACE_HUB_DISABLE_TELEMETRY"] = "1"
@@ -46,12 +49,12 @@ os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_CACHE)
 os.environ["XDG_CACHE_HOME"] = str(WRITABLE_BASE)
 
 # Create empty token files where HF might look (~/.cache/huggingface, ~/.huggingface, and HF_CACHE)
-try:
-    (HF_CACHE / "token").write_text("", encoding="utf-8")
-    (DOTCACHE / "token").write_text("", encoding="utf-8")
-    (DOTHF / "token").write_text("", encoding="utf-8")
-except Exception:
-    pass
+for token_file in (HF_CACHE / "token", DOTCACHE / "token", DOTHF / "token"):
+    try:
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text("", encoding="utf-8")
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) OpenAI & app settings (via Secrets)
@@ -122,7 +125,8 @@ st.markdown("""
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_models():
-    emb = Embedder(EMB_MODEL, NORMALIZE)
+    # Use a writable cache folder and never use a token
+    emb = Embedder(EMB_MODEL, NORMALIZE)  # Embedder internally pins cache & disables token
     rer = None
     if not DISABLE_RERANKER_BOOT:
         try:

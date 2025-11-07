@@ -18,7 +18,7 @@ class Reranker:
                 self.model = CrossEncoder(
                     model_name,
                     cache_dir=cache_dir,        # CrossEncoder uses cache_dir
-                    use_auth_token=False,       # <- never read token
+                    use_auth_token=False,       # never read token
                     trust_remote_code=False
                 )
             except Exception:
@@ -28,7 +28,6 @@ class Reranker:
         if not candidates:
             return []
         if not self.model:
-            # heuristic fallback
             scored = [(c, float(min(len((c.get("text") or "")), 1000)) / 1000.0)) for c in candidates]
             scored.sort(key=lambda x: x[1], reverse=True)
             return scored[:top_k]

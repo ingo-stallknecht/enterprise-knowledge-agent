@@ -1,6 +1,6 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (runs entirely inside Streamlit Cloud)
-# Now with first-run bootstrap: downloads a curated subset of the GitLab Handbook and builds the index.
+# Offline-safe: if HTTP bootstrap fails, we fall back to a small built-in seed corpus.
 
 import sys, os, pathlib, re, time, tempfile
 from typing import List, Dict, Tuple
@@ -72,7 +72,7 @@ MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
 RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
-AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"   # <-- new: auto fetch on first run
+AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
 
 # Ensure the repo root (one level up) is importable
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -100,11 +100,45 @@ ALPHA = float(RET.get("hybrid_alpha", 0.6))
 INDEX_PATH = RET.get("faiss_index", "data/index/handbook.index")
 STORE_PATH = RET.get("store_json", "data/index/docstore.json")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
-ensure_dirs()  # now also creates data/raw and data/processed/wiki
+ensure_dirs()  # also creates data/raw and data/processed/wiki
 
 RAW_DIR = pathlib.Path("data/raw")
 PROC_DIR = pathlib.Path("data/processed")
 WIKI_DIR = PROC_DIR / "wiki"
+
+
+# ---------------- Seed corpus (offline) ----------------
+SEED_MD: Dict[str, str] = {
+    "values.md": """# Values at Our Company
+
+We emphasize Collaboration, Results, Efficiency, Diversity & Belonging, Iteration, and Transparency.
+Values are referenced in hiring, onboarding, and performance reviews.
+
+## Values in performance reviews
+- Reviewers cite concrete behaviors that demonstrate values.
+- Examples: default to open communication; iterate in small steps; measure outcomes.
+- Employees are encouraged to give evidence (issues, MRs, docs) that illustrate the values in action.
+""",
+    "communication.md": """# Communication
+
+Default to asynchronous, documented communication. Prefer issues and documents to meetings. Summaries and decisions
+are captured in writing. For sensitive topics, use appropriate private channels, then write a public summary when possible.
+""",
+    "engineering-management.md": """# Engineering Management
+
+Managers coach iteration (ship small), measurable outcomes, and transparent decision logs. One-on-ones focus on growth,
+feedback, and removing blockers. Managers role-model values and cite them in feedback.
+""",
+}
+
+def write_seed_corpus() -> Dict:
+    WIKI_DIR.mkdir(parents=True, exist_ok=True)
+    for name, content in SEED_MD.items():
+        (WIKI_DIR / name).write_text(content.strip() + "\n", encoding="utf-8")
+    # also mirror a couple directly under processed/ to diversify sources
+    (PROC_DIR / "values.md").write_text(SEED_MD["values.md"], encoding="utf-8")
+    (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
+    return {"ok": True, "written": len(SEED_MD) + 2}
 
 
 # ---------------- Bootstrap helpers ----------------
@@ -127,14 +161,13 @@ def _slug(url: str) -> str:
 
 
 def have_any_markdown() -> bool:
-    # any .md except empty wiki dir is fine
     return any(PROC_DIR.rglob("*.md"))
 
 
 def bootstrap_gitlab(progress=None) -> Dict:
     """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
     if requests is None or md is None:
-        return {"ok": False, "error": "requests/markdownify not available (check requirements-streamlit.txt)"}
+        return {"ok": False, "error": "requests/markdownify not available"}
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PROC_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,7 +178,7 @@ def bootstrap_gitlab(progress=None) -> Dict:
         try:
             if progress:
                 progress.update(label=f"Fetching {i}/{total}: {url}", value=min(0.15, i/total * 0.15))
-            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=30)
+            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
             r.raise_for_status()
             html = r.text
             (RAW_DIR / f"{_slug(url)}.html").write_text(html, encoding="utf-8")
@@ -198,7 +231,7 @@ def _scan_processed_files() -> List[pathlib.Path]:
 def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
 
-def rebuild_index(progress) -> Dict:
+def rebuild_index(progress=None) -> Dict:
     files = _scan_processed_files()
     if progress:
         progress.update(label=f"Scanning… {len(files)} files", value=0)
@@ -237,29 +270,36 @@ def rebuild_index(progress) -> Dict:
         progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
 
+def corpus_stats() -> Dict:
+    files = list(PROC_DIR.rglob("*.md"))
+    n_files = len(files)
+    n_bytes = sum((f.stat().st_size for f in files), 0)
+    return {"files": n_files, "size_kb": int(n_bytes/1024)}
 
 # ---------------- First-run bootstrap ----------------
 def first_run_bootstrap():
-    """If no markdown present, optionally bootstrap GitLab and build index."""
+    """If no markdown present, attempt bootstrap; otherwise seed corpus."""
     if have_any_markdown():
         return
 
-    st.warning("No corpus found — bootstrapping the GitLab Handbook subset.", icon="⚠️")
-    c1, c2 = st.columns([1,1])
-    do_auto = AUTO_BOOTSTRAP
-    if not AUTO_BOOTSTRAP:
-        do_auto = c1.button("Bootstrap now")
+    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
     prog = st.progress(0.0, text="Preparing…")
 
-    if do_auto:
-        # Fetch curated pages
+    did_any = False
+    if AUTO_BOOTSTRAP:
+        # Try network bootstrap first
         fetch_res = bootstrap_gitlab(progress=prog)
-        if not fetch_res.get("ok"):
-            st.error("Bootstrap failed to fetch pages. Check internet access and requirements.", icon="❌")
-            return
-        # Build index
+        if fetch_res.get("ok"):
+            _ = rebuild_index(prog)
+            st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
+            did_any = True
+
+    if not did_any:
+        # Offline fallback: write seed corpus and build
+        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
+        write_seed_corpus()
         _ = rebuild_index(prog)
-        st.success("Bootstrap complete — corpus ingested and indexed.", icon="✅")
+        st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
 
 
 # ---------------- Retrieval & attribution ----------------
@@ -346,7 +386,7 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
 # ---------------- Header ----------------
 st.markdown(
     "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
-    "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external backend.</div></div>"
+    "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external bootstrap required.</div></div>"
     "<div><span class='badge badge-ok'>Online</span></div></div>",
     unsafe_allow_html=True
 )
@@ -371,8 +411,6 @@ with tab_ask:
             st.warning("Please enter a question.")
         else:
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
-            if not pairs:
-                st.info("No results yet. Try clicking to (re)bootstrap in the About tab, or upload a file.", icon="ℹ️")
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             st.subheader("Answer")
             st.write(ans)
@@ -491,11 +529,28 @@ with tab_upload:
 
 with tab_about:
     st.markdown("""
-### How this works (Streamlit-only)
-- **First run**: if no corpus exists, the app can automatically fetch a curated GitLab Handbook subset and build the index.
-- **Hybrid retrieval** (FAISS dense + TF-IDF) with optional Cross-Encoder reranker  
-- **Q&A:** extractive by default; GPT-assisted if `USE_OPENAI=true`  
-- **Agent:** short chain (plan→rewrite→retrieve→draft→critic) with optional wiki upsert + reindex  
-- **Uploads:** `.md`/`.txt` stored under `data/processed/wiki`; rebuild index on demand  
-- **Caching:** models cached via `st.cache_resource` while app stays warm
+### Controls & status
+- **Rebuild index**: re-embeds & rewrites FAISS/TF-IDF from current `data/processed/**.md`  
+- **Bootstrap**: try downloading the GitLab subset (if your runtime has outbound internet)  
+- **Use seed corpus**: write a small, built-in corpus and index it (works fully offline)  
+- **Corpus stats**: quick view of how much content is indexed
 """)
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("Rebuild index"):
+        prog = st.progress(0.0, text="Rebuilding…")
+        stats = rebuild_index(prog)
+        st.success(f"Rebuilt: {stats['num_chunks']} chunks from {stats['num_files']} files.")
+    if c2.button("Bootstrap (download)"):
+        prog = st.progress(0.0, text="Bootstrapping…")
+        res = bootstrap_gitlab(progress=prog)
+        if res.get("ok"):
+            stats = rebuild_index(prog)
+            st.success(f"Downloaded {res.get('downloaded',0)} pages; indexed {stats['num_chunks']} chunks.")
+        else:
+            st.error("Bootstrap failed (likely no internet or missing libs). Try 'Use seed corpus'.")
+    if c3.button("Use seed corpus"):
+        write_seed_corpus()
+        prog = st.progress(0.0, text="Indexing seed corpus…")
+        stats = rebuild_index(prog)
+        st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
+    st.info(f"Corpus stats: {corpus_stats()['files']} files · ~{corpus_stats()['size_kb']} KB")

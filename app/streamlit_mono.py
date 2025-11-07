@@ -1,15 +1,30 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (runs entirely inside Streamlit Cloud)
+# Now with first-run bootstrap: downloads a curated subset of the GitLab Handbook and builds the index.
 
 import sys, os, pathlib, re, time, tempfile
 from typing import List, Dict, Tuple
 import streamlit as st
+
+# Optional lightweight HTML→Markdown
+try:
+    from markdownify import markdownify as md
+except Exception:
+    md = None
+
+# Optional fetch
+try:
+    import requests
+except Exception:
+    requests = None
+
 
 def _secret(k, default=None):
     try:
         return st.secrets[k]
     except Exception:
         return os.environ.get(k, default)
+
 
 # --- Writable caches for HF & transformers (Streamlit Cloud safe) ---
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
@@ -57,6 +72,7 @@ MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
 RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
+AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"   # <-- new: auto fetch on first run
 
 # Ensure the repo root (one level up) is importable
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -84,15 +100,72 @@ ALPHA = float(RET.get("hybrid_alpha", 0.6))
 INDEX_PATH = RET.get("faiss_index", "data/index/handbook.index")
 STORE_PATH = RET.get("store_json", "data/index/docstore.json")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
-ensure_dirs()
+ensure_dirs()  # now also creates data/raw and data/processed/wiki
 
-# --- UI chrome ---
+RAW_DIR = pathlib.Path("data/raw")
+PROC_DIR = pathlib.Path("data/processed")
+WIKI_DIR = PROC_DIR / "wiki"
+
+
+# ---------------- Bootstrap helpers ----------------
+CURATED = [
+    "https://about.gitlab.com/handbook/",
+    "https://about.gitlab.com/handbook/values/",
+    "https://about.gitlab.com/handbook/engineering/",
+    "https://about.gitlab.com/handbook/people-group/",
+    "https://about.gitlab.com/handbook/communication/",
+    "https://about.gitlab.com/handbook/product/",
+    "https://about.gitlab.com/handbook/sales/",
+    "https://about.gitlab.com/handbook/marketing/",
+    "https://about.gitlab.com/handbook/leadership/",
+    "https://about.gitlab.com/handbook/engineering/management/",
+]
+
+def _slug(url: str) -> str:
+    s = url.split("https://about.gitlab.com/handbook/")[-1].strip("/")
+    return (s or "index").replace("/", "-")
+
+
+def have_any_markdown() -> bool:
+    # any .md except empty wiki dir is fine
+    return any(PROC_DIR.rglob("*.md"))
+
+
+def bootstrap_gitlab(progress=None) -> Dict:
+    """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
+    if requests is None or md is None:
+        return {"ok": False, "error": "requests/markdownify not available (check requirements-streamlit.txt)"}
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROC_DIR.mkdir(parents=True, exist_ok=True)
+
+    total = len(CURATED)
+    ok = 0
+    for i, url in enumerate(CURATED, 1):
+        try:
+            if progress:
+                progress.update(label=f"Fetching {i}/{total}: {url}", value=min(0.15, i/total * 0.15))
+            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=30)
+            r.raise_for_status()
+            html = r.text
+            (RAW_DIR / f"{_slug(url)}.html").write_text(html, encoding="utf-8")
+            (PROC_DIR / f"{_slug(url)}.md").write_text(md(html), encoding="utf-8")
+            ok += 1
+            time.sleep(0.05)
+        except Exception:
+            # best-effort: continue
+            pass
+    return {"ok": ok > 0, "downloaded": ok, "total": total}
+
+
+# ---------------- UI chrome ----------------
 st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
 st.markdown("""
 <style>
 .header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .badge { border-radius:999px; padding:4px 10px; font-size:0.85rem; border:1px solid transparent; }
 .badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
+.badge-warn{ background:#FFF7ED; color:#9A3412; border-color:#FED7AA; }
 .kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
 .small{font-size:0.92rem;color:#687076;}
 .cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px; border-radius:999px;
@@ -102,6 +175,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ---------------- Models & index ----------------
 @st.cache_resource(show_spinner=False)
 def get_models():
     emb = Embedder(EMB_MODEL, NORMALIZE)
@@ -118,14 +193,15 @@ def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
 
 def _scan_processed_files() -> List[pathlib.Path]:
-    return sorted(pathlib.Path("data/processed").glob("**/*.md"))
+    return sorted(PROC_DIR.glob("**/*.md"))
 
 def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
 
 def rebuild_index(progress) -> Dict:
     files = _scan_processed_files()
-    progress.update(label=f"Scanning… {len(files)} files", value=0)
+    if progress:
+        progress.update(label=f"Scanning… {len(files)} files", value=0)
     records = []
     done = 0
     for i, fp in enumerate(files, 1):
@@ -133,8 +209,9 @@ def rebuild_index(progress) -> Dict:
         for ch in _split_md(t):
             records.append({"text": ch["text"], "source": str(fp).replace("\\","/")})
         done = i
-        progress.update(label=f"Chunking… {done}/{len(files)} files",
-                        value=min(0.25, 0.05 + 0.20*(done/max(1,len(files)))))
+        if progress:
+            progress.update(label=f"Chunking… {done}/{len(files)} files",
+                            value=min(0.25, 0.05 + 0.20*(done/max(1,len(files)))))
 
     import numpy as np
     emb, _ = get_models()
@@ -145,18 +222,47 @@ def rebuild_index(progress) -> Dict:
         for s in range(0, len(texts), batch):
             e = min(len(texts), s+batch)
             vecs.append(emb.encode(texts[s:e]))
-            progress.update(label=f"Embedding… {e}/{len(texts)} chunks",
-                            value=0.25 + 0.60*(e/max(1,len(texts))))
+            if progress:
+                progress.update(label=f"Embedding… {e}/{len(texts)} chunks",
+                                value=0.25 + 0.60*(e/max(1,len(texts))))
         X = np.vstack(vecs)
     else:
         X = np.zeros((0, 384), dtype="float32")
 
     idx = load_or_init_index()
-    progress.update(label="Writing index…", value=0.9)
+    if progress:
+        progress.update(label="Writing index…", value=0.9)
     idx.build(X, records)
-    progress.update(label="Done", value=1.0)
+    if progress:
+        progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
 
+
+# ---------------- First-run bootstrap ----------------
+def first_run_bootstrap():
+    """If no markdown present, optionally bootstrap GitLab and build index."""
+    if have_any_markdown():
+        return
+
+    st.warning("No corpus found — bootstrapping the GitLab Handbook subset.", icon="⚠️")
+    c1, c2 = st.columns([1,1])
+    do_auto = AUTO_BOOTSTRAP
+    if not AUTO_BOOTSTRAP:
+        do_auto = c1.button("Bootstrap now")
+    prog = st.progress(0.0, text="Preparing…")
+
+    if do_auto:
+        # Fetch curated pages
+        fetch_res = bootstrap_gitlab(progress=prog)
+        if not fetch_res.get("ok"):
+            st.error("Bootstrap failed to fetch pages. Check internet access and requirements.", icon="❌")
+            return
+        # Build index
+        _ = rebuild_index(prog)
+        st.success("Bootstrap complete — corpus ingested and indexed.", icon="✅")
+
+
+# ---------------- Retrieval & attribution ----------------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     t0 = time.time()
     emb, rer = get_models()
@@ -236,6 +342,8 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
+
+# ---------------- Header ----------------
 st.markdown(
     "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
     "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external backend.</div></div>"
@@ -243,6 +351,10 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# Trigger first-run bootstrap (no-op if data already exists)
+first_run_bootstrap()
+
+# ---------------- Tabs ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
 with tab_ask:
@@ -253,11 +365,14 @@ with tab_ask:
     mode = colA.selectbox("Retrieval mode", ["hybrid","dense","sparse"],
                           index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
     use_rr = colB.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
+
     if st.button("Get answer", type="primary"):
         if not q.strip():
             st.warning("Please enter a question.")
         else:
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
+            if not pairs:
+                st.info("No results yet. Try clicking to (re)bootstrap in the About tab, or upload a file.", icon="ℹ️")
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             st.subheader("Answer")
             st.write(ans)
@@ -315,11 +430,11 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
 
     applied = []
     if auto_actions and actions:
-        wiki_dir = pathlib.Path("data/processed/wiki"); wiki_dir.mkdir(parents=True, exist_ok=True)
+        WIKI_DIR.mkdir(parents=True, exist_ok=True)
         for a in actions:
             if a.get("type") == "upsert_wiki_draft":
                 slug = re.sub(r"[^a-z0-9\-]+", "-", a["title"].lower()).strip("-") or "page"
-                (wiki_dir / f"{slug}.md").write_text(a["content"], encoding="utf-8")
+                (WIKI_DIR / f"{slug}.md").write_text(a["content"], encoding="utf-8")
                 applied.append({"upserted": f"{slug}.md"})
         if applied:
             prog = st.progress(0.0, text="Agent: updating index…")
@@ -365,11 +480,11 @@ with tab_upload:
         if not f:
             st.warning("Please select a file first.")
         else:
-            name = ttl.strip() or f.name
+            name = (ttl or f.name).strip() or "page"
             slug = re.sub(r"[^a-z0-9\\-]+", "-", name.lower()).strip("-") or "page"
-            wiki_dir = pathlib.Path("data/processed/wiki"); wiki_dir.mkdir(parents=True, exist_ok=True)
+            WIKI_DIR.mkdir(parents=True, exist_ok=True)
             text = f.getvalue().decode("utf-8", errors="ignore")
-            (wiki_dir / f"{slug}.md").write_text(text, encoding="utf-8")
+            (WIKI_DIR / f"{slug}.md").write_text(text, encoding="utf-8")
             prog = st.progress(0.0, text="Queued…")
             stats = rebuild_index(prog)
             st.success(f"✅ Indexed {stats['num_chunks']} chunks from {stats['num_files']} files.")
@@ -377,10 +492,10 @@ with tab_upload:
 with tab_about:
     st.markdown("""
 ### How this works (Streamlit-only)
+- **First run**: if no corpus exists, the app can automatically fetch a curated GitLab Handbook subset and build the index.
 - **Hybrid retrieval** (FAISS dense + TF-IDF) with optional Cross-Encoder reranker  
 - **Q&A:** extractive by default; GPT-assisted if `USE_OPENAI=true`  
 - **Agent:** short chain (plan→rewrite→retrieve→draft→critic) with optional wiki upsert + reindex  
 - **Uploads:** `.md`/`.txt` stored under `data/processed/wiki`; rebuild index on demand  
-- **Caching:** models cached via `st.cache_resource` while app stays warm  
-- **Note:** Streamlit Community Cloud storage is ephemeral — keep core corpus in Git or fetch on first run.
+- **Caching:** models cached via `st.cache_resource` while app stays warm
 """)

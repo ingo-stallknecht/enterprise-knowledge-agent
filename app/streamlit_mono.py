@@ -5,47 +5,57 @@ import sys, os, pathlib, re, time, tempfile
 from typing import List, Dict, Tuple
 import streamlit as st
 
-# -----------------------------------------------------------------------------
-# 0️⃣ Writable cache setup for Streamlit Cloud (no /app writes)
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 0) Writable cache sandbox for Streamlit Cloud (fixes HF PermissionError)
+# ──────────────────────────────────────────────────────────────────────────────
 def _secret(k, default=None):
     try:
         return st.secrets[k]
     except Exception:
         return os.environ.get(k, default)
 
-# Everything writable lives under /mount/tmp
+# Put EVERYTHING in /mount/tmp (writable)
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", tempfile.gettempdir())) / "eka"
 HF_CACHE = WRITABLE_BASE / "hf"
+DOTCACHE = WRITABLE_BASE / ".cache" / "huggingface"
+DOTHF = WRITABLE_BASE / ".huggingface"
 
-for p in (WRITABLE_BASE, HF_CACHE):
+for p in (WRITABLE_BASE, HF_CACHE, DOTCACHE, DOTHF):
     try:
         p.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
-# Disable token lookups & telemetry
+# Make ~ point into WRITABLE_BASE so any "~/.cache" reads are safe
+os.environ["HOME"] = str(WRITABLE_BASE)
+
+# Disable token lookups & telemetry and force all caches to writable tmp
 os.environ["HUGGING_FACE_HUB_TOKEN"] = ""
 os.environ["HF_TOKEN"] = ""
+os.environ["HUGGINGFACE_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_CACHE_SYMLINKS"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Force all HF libs to use writable tmp paths
+# Point every known cache var into our sandbox
 os.environ["HF_HOME"] = str(HF_CACHE)
 os.environ["TRANSFORMERS_CACHE"] = str(HF_CACHE)
 os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(HF_CACHE)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_CACHE)
 os.environ["XDG_CACHE_HOME"] = str(WRITABLE_BASE)
 
-# Create empty token file to stop probing ~/.*
+# Create empty token files where HF might look (~/.cache/huggingface, ~/.huggingface, and HF_CACHE)
 try:
     (HF_CACHE / "token").write_text("", encoding="utf-8")
+    (DOTCACHE / "token").write_text("", encoding="utf-8")
+    (DOTHF / "token").write_text("", encoding="utf-8")
 except Exception:
     pass
 
-# -----------------------------------------------------------------------------
-# 1️⃣ OpenAI + app settings
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) OpenAI & app settings (via Secrets)
+# ──────────────────────────────────────────────────────────────────────────────
 os.environ["USE_OPENAI"] = _secret("USE_OPENAI", "true")
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
@@ -58,9 +68,9 @@ RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
 
-# -----------------------------------------------------------------------------
-# 2️⃣ Make sure "app" package is importable
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 2) Make sure "app" package is importable
+# ──────────────────────────────────────────────────────────────────────────────
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -72,9 +82,9 @@ from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
 
-# -----------------------------------------------------------------------------
-# 3️⃣ Config
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) Config
+# ──────────────────────────────────────────────────────────────────────────────
 CFG = {}
 cfg_path = pathlib.Path("configs/settings.yaml")
 if cfg_path.exists():
@@ -89,9 +99,9 @@ STORE_PATH = RET.get("store_json", "data/index/docstore.json")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
 ensure_dirs()
 
-# -----------------------------------------------------------------------------
-# 4️⃣ UI basics
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) UI basics
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
 st.markdown("""
 <style>
@@ -107,9 +117,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# 5️⃣ Cached resources
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) Cached resources (models & index)
+# ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_models():
     emb = Embedder(EMB_MODEL, NORMALIZE)
@@ -125,9 +135,9 @@ def get_models():
 def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
 
-# -----------------------------------------------------------------------------
-# 6️⃣ Core helpers
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 6) Core helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def _scan_processed_files() -> List[pathlib.Path]:
     return sorted(pathlib.Path("data/processed").glob("**/*.md"))
 
@@ -191,9 +201,9 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
             "retrieval_ms": int((time.time()-t0)*1000)}
     return top_records, reranked, meta
 
-# -----------------------------------------------------------------------------
-# 7️⃣ Context Visualizer
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 7) Context Visualizer
+# ──────────────────────────────────────────────────────────────────────────────
 _SENT_SPLIT = re.compile(r'(?<=[\.\?!])\s+(?=[A-Z0-9])')
 def _split_sentences(text: str) -> List[str]:
     t = (text or "").strip()
@@ -250,9 +260,9 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
-# -----------------------------------------------------------------------------
-# 8️⃣ UI
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 8) UI with Ask / Agent / Upload / About
+# ──────────────────────────────────────────────────────────────────────────────
 st.markdown(
     "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
     "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external backend.</div></div>"
@@ -260,9 +270,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-tab_ask, tab_upload, tab_about = st.tabs(["Ask", "Upload", "About"])
+tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
-# --- Ask tab ---
+# --- Ask ---
 with tab_ask:
     st.markdown("**Answers from your local corpus (GitLab + uploads). Shows citations and sentence→source mapping.**")
     q = st.text_area("Your question", height=100, placeholder="e.g., How are values applied in performance reviews?")
@@ -303,7 +313,80 @@ with tab_ask:
                 with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"):
                     st.write(c['preview'])
 
-# --- Upload tab ---
+# --- Agent ---
+def agent_run(message: str, auto_actions: bool = False) -> Dict:
+    trace: List[Dict] = []
+    plan = ["rewrite_query", "retrieve", "draft", "critic"]
+    trace.append({"step": 1, "action": "plan", "output": plan})
+
+    query = (message or "").strip()
+    if len(query) < 12 or not query.endswith("?"):
+        query = (query.rstrip(".") + "?")
+    trace.append({"step": 2, "action": "rewrite_query", "output": query})
+
+    records, pairs, _meta = retrieve(query, TOP_K, "hybrid", use_reranker=False)
+    trace.append({"step": 3, "action": "retrieve", "results": [
+        {"source": r.get("source"), "preview": (r.get("text","")[:200] + "…")} for r,_ in pairs[:6]
+    ]})
+
+    answer, _ = generate_answer(records, query, max_chars=900)
+    trace.append({"step": 4, "action": "draft", "output": (answer[:1000] + ("…" if len(answer)>1000 else ""))})
+
+    gaps, actions = [], []
+    confidence = 0.65 if len(answer) > 200 else 0.45
+    if "example" not in answer.lower():
+        gaps.append("Add concrete, example-driven guidance.")
+        actions.append({
+            "type": "upsert_wiki_draft",
+            "title": "Example-Rich Guide",
+            "content": "# Example-Rich Guide\n\nAdd concrete Q&A and scenarios mapped to values.\n\n- Example 1 …\n- Example 2 …\n"
+        })
+
+    applied = []
+    if auto_actions and actions:
+        wiki_dir = pathlib.Path("data/processed/wiki"); wiki_dir.mkdir(parents=True, exist_ok=True)
+        for a in actions:
+            if a.get("type") == "upsert_wiki_draft":
+                slug = re.sub(r"[^a-z0-9\-]+", "-", a["title"].lower()).strip("-") or "page"
+                (wiki_dir / f"{slug}.md").write_text(a["content"], encoding="utf-8")
+                applied.append({"upserted": f"{slug}.md"})
+        if applied:
+            prog = st.progress(0.0, text="Agent: updating index…")
+            rebuild_index(prog)
+
+    step5 = {"step": 5, "action": "critic", "confidence": confidence}
+    if gaps: step5["gaps"] = gaps
+    if actions: step5["actions"] = actions
+    trace.append(step5)
+
+    return {"answer": answer, "trace": trace, "applied_actions": applied}
+
+with tab_agent:
+    st.markdown("**Agent: plan → rewrite → retrieve → draft → critic. Can upsert a wiki draft and reindex.**")
+    msg = st.text_area("Goal or task", height=110,
+                       placeholder="e.g., Create an example-rich note on values in performance reviews; if gaps, propose a wiki draft.")
+    auto = st.checkbox("Allow auto-actions (create wiki draft + reindex)", value=False)
+    if st.button("Run agent", type="primary"):
+        if not msg.strip():
+            st.warning("Please describe what you want the agent to do.")
+        else:
+            res = agent_run(msg, auto_actions=auto)
+            st.subheader("Agent answer"); st.write(res.get("answer",""))
+            st.markdown("#### Plan & Trace")
+            for step in res.get("trace", []):
+                st.markdown(f"- **Step {step['step']}: {step['action']}**")
+                if step["action"] == "rewrite_query":
+                    st.code(step.get("output",""))
+                elif step["action"] == "retrieve":
+                    for r in step.get("results", []): st.markdown(f"  • **{r['source']}** — {r['preview']}")
+                elif step["action"] == "critic":
+                    st.write(f"  • Confidence: {step.get('confidence',0.0):.2f}")
+                    if step.get("gaps"): st.write("  • Gaps:"); [st.write(f"    - {g}") for g in step["gaps"]]
+                    if step.get("actions"): st.write("  • Proposed actions:"); st.json(step["actions"])
+            if res.get("applied_actions"):
+                st.success(f"✅ Applied: {res['applied_actions']}")
+
+# --- Upload ---
 with tab_upload:
     st.markdown("**Upload `.md` or `.txt` — added to the knowledge base.**")
     f = st.file_uploader("Upload a file", type=["md","txt"])
@@ -321,13 +404,14 @@ with tab_upload:
             stats = rebuild_index(prog)
             st.success(f"✅ Indexed {stats['num_chunks']} chunks from {stats['num_files']} files.")
 
-# --- About tab ---
+# --- About ---
 with tab_about:
     st.markdown("""
 ### How this works (Streamlit-only)
-- **Hybrid retrieval** (FAISS dense + TF-IDF)
-- **Q&A:** extractive or GPT-assisted (`USE_OPENAI=true`)
-- **Uploads:** stored under `data/processed/wiki`; reindex on demand
-- **Caching:** models cached via `st.cache_resource`
-- **Ephemeral:** Streamlit Cloud resets on sleep; keep corpus in Git for persistence.
+- **Hybrid retrieval** (FAISS dense + TF-IDF) with optional Cross-Encoder reranker  
+- **Q&A:** extractive by default; GPT-assisted if `USE_OPENAI=true`  
+- **Agent:** short chain (plan→rewrite→retrieve→draft→critic) with optional wiki upsert + reindex  
+- **Uploads:** `.md`/`.txt` stored under `data/processed/wiki`; rebuild index on demand  
+- **Caching:** models cached via `st.cache_resource` while app stays warm  
+- **Note:** Streamlit Community Cloud storage is ephemeral — keep core corpus in Git or fetch on first run.
 """)

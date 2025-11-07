@@ -1,0 +1,14 @@
+# Base minimal set
+-r requirements.txt
+
+# Add local-only tools
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.9
+
+mlflow==2.16.0
+pytest==8.3.2
+
+# (Optional) Airflow if you actually use it locally
+# apache-airflow==2.9.3

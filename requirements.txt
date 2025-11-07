@@ -1,38 +1,24 @@
-# ---------- PyTorch CPU index (FIRST) ----------
 --index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple
-# ----------------------------------------------
 
-# Core numerical + ML stack
+# Core
 numpy==1.26.4
 scikit-learn==1.5.1
-
-# Sentence Embeddings + Rerankers (via PyTorch CPU)
 torch==2.4.1
+faiss-cpu==1.8.0.post1
+
+# Models
 sentence-transformers==3.0.1
 transformers==4.44.2
 
-# UI + FastAPI
+# App
 streamlit==1.38.0
-fastapi==0.115.0
-uvicorn==0.30.6
-pydantic==2.9.2
-python-dotenv==1.0.1
-python-multipart==0.0.9
-requests==2.32.3
-markdownify==0.14.1
 python-slugify==8.0.4
-
-# MLflow + YAML config
-mlflow==2.16.0
+markdownify==0.14.1
+requests==2.32.3
+python-dotenv==1.0.1
 pyyaml==6.0.2
 
-# Vector + retrieval
-faiss-cpu==1.8.0.post1
-
-# GPT client
+# OpenAI client
 openai>=1.40.0
 tiktoken>=0.7.0
-
-# Tests (optional)
-pytest==8.3.2

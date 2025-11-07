@@ -1,6 +1,6 @@
 # Enterprise Knowledge Agent
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://YOUR-USERNAME-enterprise-knowledge-agent.streamlit.app)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-6fs3f3ha2qmmbi4wwgxyjn.streamlit.app/)
 
 Hybrid RAG + reranker + GPT-optional answers with a polished Streamlit UI, async uploads → reindex pipeline,
 evaluation + MLflow logging, and threshold-gated promotion/true rollback of the FAISS index snapshot.

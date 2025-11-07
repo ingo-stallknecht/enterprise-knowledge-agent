@@ -3,7 +3,7 @@
 # Offline-safe: if HTTP bootstrap fails, we fall back to a small built-in seed corpus.
 
 import sys, os, pathlib, re, time, tempfile
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import streamlit as st
 
 # Optional lightweight HTML→Markdown
@@ -106,6 +106,21 @@ RAW_DIR = pathlib.Path("data/raw")
 PROC_DIR = pathlib.Path("data/processed")
 WIKI_DIR = PROC_DIR / "wiki"
 
+# ---------------- Progress wrapper (fixes Streamlit 1.38 API) ----------------
+class Prog:
+    def __init__(self, initial_text: str = "Working…"):
+        self._pb = st.progress(0, text=initial_text)
+        self._last = 0.0
+    def update(self, label: Optional[str] = None, value: Optional[float] = None):
+        if value is None:
+            value = self._last
+        value = max(0.0, min(float(value), 1.0))
+        self._last = value
+        if label is None:
+            self._pb.progress(int(value * 100))
+        else:
+            # Streamlit 1.38 supports text= kw on .progress
+            self._pb.progress(int(value * 100), text=label)
 
 # ---------------- Seed corpus (offline) ----------------
 SEED_MD: Dict[str, str] = {
@@ -140,7 +155,6 @@ def write_seed_corpus() -> Dict:
     (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
     return {"ok": True, "written": len(SEED_MD) + 2}
 
-
 # ---------------- Bootstrap helpers ----------------
 CURATED = [
     "https://about.gitlab.com/handbook/",
@@ -162,7 +176,7 @@ def _slug(url: str) -> str:
 def have_any_markdown() -> bool:
     return any(PROC_DIR.rglob("*.md"))
 
-def bootstrap_gitlab(progress=None) -> Dict:
+def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
     if requests is None or md is None:
         return {"ok": False, "error": "requests/markdownify not available"}
@@ -187,7 +201,6 @@ def bootstrap_gitlab(progress=None) -> Dict:
             # best-effort: continue
             pass
     return {"ok": ok > 0, "downloaded": ok, "total": total}
-
 
 # ---------------- UI chrome ----------------
 st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
@@ -236,7 +249,7 @@ def first_run_bootstrap():
         return
 
     st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
-    prog = st.progress(0.0, text="Preparing…")
+    prog = Prog("Preparing…")
 
     did_any = False
     if AUTO_BOOTSTRAP:
@@ -256,7 +269,6 @@ def first_run_bootstrap():
 
 # Trigger on load
 first_run_bootstrap()
-
 
 # ---------------- Models & index ----------------
 @st.cache_resource(show_spinner=False)
@@ -280,7 +292,7 @@ def _scan_processed_files() -> List[pathlib.Path]:
 def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
 
-def rebuild_index(progress=None) -> Dict:
+def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     files = _scan_processed_files()
     if progress:
         progress.update(label=f"Scanning… {len(files)} files", value=0)
@@ -318,7 +330,6 @@ def rebuild_index(progress=None) -> Dict:
     if progress:
         progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
-
 
 # ---------------- Retrieval & attribution ----------------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
@@ -399,7 +410,6 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
             "preview": (txt[:280]+"…") if len(txt)>280 else txt
         })
     return cites
-
 
 # ---------------- Tabs & UI ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
@@ -487,7 +497,7 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
                 (WIKI_DIR / f"{slug}.md").write_text(a["content"], encoding="utf-8")
                 applied.append({"upserted": f"{slug}.md"})
         if applied:
-            prog = st.progress(0.0, text="Agent: updating index…")
+            prog = Prog("Agent: updating index…")
             rebuild_index(prog)
 
     step5 = {"step": 5, "action": "critic", "confidence": confidence}
@@ -535,7 +545,7 @@ with tab_upload:
             WIKI_DIR.mkdir(parents=True, exist_ok=True)
             text = f.getvalue().decode("utf-8", errors="ignore")
             (WIKI_DIR / f"{slug}.md").write_text(text, encoding="utf-8")
-            prog = st.progress(0.0, text="Queued…")
+            prog = Prog("Indexing upload…")
             stats = rebuild_index(prog)
             st.success(f"✅ Indexed {stats['num_chunks']} chunks from {stats['num_files']} files.")
 
@@ -549,11 +559,11 @@ with tab_about:
 """)
     c1, c2, c3, c4 = st.columns(4)
     if c1.button("Rebuild index"):
-        prog = st.progress(0.0, text="Rebuilding…")
+        prog = Prog("Rebuilding…")
         stats = rebuild_index(prog)
         st.success(f"Rebuilt: {stats['num_chunks']} chunks from {stats['num_files']} files.")
     if c2.button("Bootstrap (download)"):
-        prog = st.progress(0.0, text="Bootstrapping…")
+        prog = Prog("Bootstrapping…")
         res = bootstrap_gitlab(progress=prog)
         if res.get("ok"):
             stats = rebuild_index(prog)
@@ -562,7 +572,7 @@ with tab_about:
             st.error("Bootstrap failed (likely no internet or missing libs). Try 'Use seed corpus'.")
     if c3.button("Use seed corpus"):
         write_seed_corpus()
-        prog = st.progress(0.0, text="Indexing seed corpus…")
+        prog = Prog("Indexing seed corpus…")
         stats = rebuild_index(prog)
         st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
     stats_now = corpus_stats()

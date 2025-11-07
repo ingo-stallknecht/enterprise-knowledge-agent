@@ -1,4 +1,10 @@
-# Enterprise Knowledge Agent (RAG + Actions, No‑Cloud)
+# Enterprise Knowledge Agent
+
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://YOUR-USERNAME-enterprise-knowledge-agent.streamlit.app)
+
+Hybrid RAG + reranker + GPT-optional answers with a polished Streamlit UI, async uploads → reindex pipeline,
+evaluation + MLflow logging, and threshold-gated promotion/true rollback of the FAISS index snapshot.
+
 
 
 **What**: Local, production‑style RAG agent over GitLab Handbook with agent actions, Airflow weekly refresh, and MLflow‑gated promotion + rollback.

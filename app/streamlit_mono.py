@@ -159,10 +159,8 @@ def _slug(url: str) -> str:
     s = url.split("https://about.gitlab.com/handbook/")[-1].strip("/")
     return (s or "index").replace("/", "-")
 
-
 def have_any_markdown() -> bool:
     return any(PROC_DIR.rglob("*.md"))
-
 
 def bootstrap_gitlab(progress=None) -> Dict:
     """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
@@ -207,6 +205,57 @@ st.markdown("""
 .cv-b3 { background:#ECFEFF; } .cv-b4 { background:#F0FDF4; }
 </style>
 """, unsafe_allow_html=True)
+
+def _openai_diag() -> str:
+    use = os.getenv("USE_OPENAI", "false").lower() == "true"
+    has_key = bool(os.getenv("OPENAI_API_KEY", ""))
+    if use and has_key:
+        return "OpenAI: ON (key ✓)"
+    if use and not has_key:
+        return "OpenAI: ON (key missing ⚠)"
+    return "OpenAI: OFF"
+
+# ---------------- Header ----------------
+st.markdown(
+    "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
+    f"<div class='small'>Runs fully inside Streamlit. {_openai_diag()}</div></div>"
+    "<div><span class='badge badge-ok'>Online</span></div></div>",
+    unsafe_allow_html=True
+)
+
+# ---------------- First-run bootstrap ----------------
+def corpus_stats() -> Dict:
+    files = list(PROC_DIR.rglob("*.md"))
+    n_files = len(files)
+    n_bytes = sum((f.stat().st_size for f in files), 0)
+    return {"files": n_files, "size_kb": int(n_bytes/1024)}
+
+def first_run_bootstrap():
+    """If no markdown present, attempt bootstrap; otherwise seed corpus."""
+    if have_any_markdown():
+        return
+
+    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
+    prog = st.progress(0.0, text="Preparing…")
+
+    did_any = False
+    if AUTO_BOOTSTRAP:
+        # Try network bootstrap first
+        fetch_res = bootstrap_gitlab(progress=prog)
+        if fetch_res.get("ok"):
+            _ = rebuild_index(prog)
+            st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
+            did_any = True
+
+    if not did_any:
+        # Offline fallback: write seed corpus and build
+        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
+        write_seed_corpus()
+        _ = rebuild_index(prog)
+        st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
+
+# Trigger on load
+first_run_bootstrap()
 
 
 # ---------------- Models & index ----------------
@@ -269,37 +318,6 @@ def rebuild_index(progress=None) -> Dict:
     if progress:
         progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
-
-def corpus_stats() -> Dict:
-    files = list(PROC_DIR.rglob("*.md"))
-    n_files = len(files)
-    n_bytes = sum((f.stat().st_size for f in files), 0)
-    return {"files": n_files, "size_kb": int(n_bytes/1024)}
-
-# ---------------- First-run bootstrap ----------------
-def first_run_bootstrap():
-    """If no markdown present, attempt bootstrap; otherwise seed corpus."""
-    if have_any_markdown():
-        return
-
-    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
-    prog = st.progress(0.0, text="Preparing…")
-
-    did_any = False
-    if AUTO_BOOTSTRAP:
-        # Try network bootstrap first
-        fetch_res = bootstrap_gitlab(progress=prog)
-        if fetch_res.get("ok"):
-            _ = rebuild_index(prog)
-            st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
-            did_any = True
-
-    if not did_any:
-        # Offline fallback: write seed corpus and build
-        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
-        write_seed_corpus()
-        _ = rebuild_index(prog)
-        st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
 
 
 # ---------------- Retrieval & attribution ----------------
@@ -383,18 +401,7 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
     return cites
 
 
-# ---------------- Header ----------------
-st.markdown(
-    "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
-    "<div class='small'>Runs fully inside Streamlit. Secrets-powered OpenAI. No external bootstrap required.</div></div>"
-    "<div><span class='badge badge-ok'>Online</span></div></div>",
-    unsafe_allow_html=True
-)
-
-# Trigger first-run bootstrap (no-op if data already exists)
-first_run_bootstrap()
-
-# ---------------- Tabs ----------------
+# ---------------- Tabs & UI ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
 with tab_ask:
@@ -412,8 +419,13 @@ with tab_ask:
         else:
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
+
             st.subheader("Answer")
-            st.write(ans)
+            if not (ans or "").strip():
+                st.warning("No text returned. Likely no indexed corpus or GPT call failed. Try 'About → Use seed corpus' then press 'Rebuild index'.")
+            else:
+                st.write(ans)
+
             m1, m2, m3, m4 = st.columns(4)
             m1.markdown(f"<div class='kpi'>Sources: <b>{len(pairs[:TOP_K])}</b></div>", unsafe_allow_html=True)
             m2.markdown(f"<div class='kpi'>Retrieval: <b>{meta.get('mode','')}</b></div>", unsafe_allow_html=True)
@@ -553,4 +565,5 @@ with tab_about:
         prog = st.progress(0.0, text="Indexing seed corpus…")
         stats = rebuild_index(prog)
         st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
-    st.info(f"Corpus stats: {corpus_stats()['files']} files · ~{corpus_stats()['size_kb']} KB")
+    stats_now = corpus_stats()
+    st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

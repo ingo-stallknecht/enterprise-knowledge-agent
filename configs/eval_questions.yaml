@@ -1,0 +1,251 @@
+# Evaluation question set for RAG retrieval
+# ----------------------------------------------------------------------
+# RULES for adding items:
+# - Each item MUST have:
+#     q:            The user question (concise, natural language).
+#     must_terms:   List of keywords/phrases that should appear in relevant passages (OR condition).
+# - Optionally add:
+#     should_terms: Terms that often co-occur; used to strengthen relevance (not mandatory).
+#     relevant_sources: Filenames or substrings of sources considered relevant (e.g., "values.md", "wiki/values-influence-hiring").
+#       If provided, a passage is counted as relevant if its source path contains ANY of these substrings.
+# - Keep qs unambiguous and concrete; prefer domain language from your corpus (GitLab handbook).
+# - Mix easy + moderate + hard queries. Include your wiki pages too.
+# ----------------------------------------------------------------------
+
+- q: "How are values applied in performance reviews?"
+  must_terms: ["values", "performance"]
+  should_terms: ["review", "feedback"]
+  relevant_sources: ["values.md"]
+
+- q: "Give examples of values influencing hiring at GitLab"
+  must_terms: ["values", "hiring", "example"]
+  relevant_sources: ["values.md", "wiki/values-influence-hiring"]
+
+- q: "Why is 'culture fit' discouraged in hiring?"
+  must_terms: ["culture fit", "hiring"]
+  relevant_sources: ["values.md", "wiki/values-influence-hiring"]
+
+- q: "What does 'everything is in draft' mean at GitLab?"
+  must_terms: ["everything is in draft"]
+  relevant_sources: ["values.md"]
+
+- q: "How is transparency practiced day to day?"
+  must_terms: ["transparency"]
+  should_terms: ["default to open", "sharing", "written", "handbook"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "What is iteration and why does it matter?"
+  must_terms: ["iteration"]
+  should_terms: ["MVC", "small steps", "iterate"]
+  relevant_sources: ["values.md"]
+
+- q: "Communication guidelines to reduce sync load"
+  must_terms: ["communication", "async"]
+  should_terms: ["meetings", "handbook", "written"]
+  relevant_sources: ["communication.md"]
+
+- q: "Engineering management guidance overview"
+  must_terms: ["engineering", "management"]
+  relevant_sources: ["engineering.md"]
+
+- q: "Examples of efficiency in decision making"
+  must_terms: ["efficiency", "decision"]
+  relevant_sources: ["values.md"]
+
+- q: "How does GitLab approach diversity and inclusion?"
+  must_terms: ["diversity", "inclusion"]
+  should_terms: ["belonging"]
+  relevant_sources: ["values.md"]
+
+- q: "Give interview questions that test collaboration"
+  must_terms: ["collaboration", "interview", "question"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]
+
+- q: "How to evaluate results orientation in candidates"
+  must_terms: ["results", "evaluate", "candidates"]
+  should_terms: ["outcome", "impact", "metric"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]
+
+- q: "Signals of transparency during interviews"
+  must_terms: ["transparency", "interview"]
+  should_terms: ["signals", "examples"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]
+
+- q: "When is 'culture fit' a bad excuse?"
+  must_terms: ["culture fit", "bad excuse"]
+  relevant_sources: ["values.md"]
+
+- q: "How to phrase feedback aligned with values"
+  must_terms: ["feedback", "values"]
+  should_terms: ["specific", "examples"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Default to open: examples in practice"
+  must_terms: ["default to open", "examples"]
+  should_terms: ["transparency"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Reduce meetings with asynchronous practices"
+  must_terms: ["asynchronous", "meetings"]
+  should_terms: ["documentation", "written"]
+  relevant_sources: ["communication.md"]
+
+- q: "What is MVC and how to apply it?"
+  must_terms: ["MVC", "iteration"]
+  should_terms: ["minimum viable change"]
+  relevant_sources: ["values.md", "engineering.md"]
+
+- q: "How to make decisions consistently across teams"
+  must_terms: ["decisions", "consistently"]
+  should_terms: ["values", "framework"]
+  relevant_sources: ["values.md"]
+
+- q: "Examples of values erosion and how to prevent it"
+  must_terms: ["values erosion", "prevent"]
+  should_terms: ["apathy", "indifference"]
+  relevant_sources: ["values.md"]
+
+- q: "How to run productive retrospectives"
+  must_terms: ["retrospective", "improvement"]
+  should_terms: ["action items"]
+  relevant_sources: ["engineering.md"]
+
+- q: "Guidance for written communication quality"
+  must_terms: ["written", "communication", "guidance"]
+  should_terms: ["clarity", "concise"]
+  relevant_sources: ["communication.md"]
+
+- q: "Examples of iteration in hiring process"
+  must_terms: ["iteration", "hiring", "example"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]
+
+- q: "How to surface disagreements constructively"
+  must_terms: ["disagree", "constructive"]
+  should_terms: ["collaboration", "feedback"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Performance review: linking to values"
+  must_terms: ["performance review", "values"]
+  relevant_sources: ["values.md"]
+
+- q: "Interview rubric examples for efficiency"
+  must_terms: ["interview", "rubric", "efficiency"]
+  relevant_sources: ["wiki/values-influence-hiring"]
+
+- q: "When should we document decisions?"
+  must_terms: ["document", "decisions"]
+  should_terms: ["record", "history"]
+  relevant_sources: ["communication.md", "values.md"]
+
+- q: "How to prepare for a values-based interview"
+  must_terms: ["values-based", "interview", "prepare"]
+  relevant_sources: ["wiki/values-influence-hiring"]
+
+- q: "Examples that demonstrate inclusion behaviors"
+  must_terms: ["inclusion", "example", "behavior"]
+  relevant_sources: ["values.md", "wiki/values-influence-hiring"]
+
+- q: "How to avoid bias in hiring discussions"
+  must_terms: ["bias", "hiring"]
+  should_terms: ["structured", "rubric"]
+  relevant_sources: ["values.md", "wiki/values-influence-hiring"]
+
+- q: "Principles for async feedback and reviews"
+  must_terms: ["async", "feedback", "reviews"]
+  should_terms: ["latency", "clarity"]
+  relevant_sources: ["communication.md"]
+
+- q: "Examples of transparency in planning"
+  must_terms: ["transparency", "planning", "example"]
+  should_terms: ["roadmap", "milestones"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Effective handoffs between teams"
+  must_terms: ["handoff", "teams", "effective"]
+  should_terms: ["documentation", "ownership"]
+  relevant_sources: ["communication.md", "engineering.md"]
+
+- q: "How to set clear ownership (DRIs)"
+  must_terms: ["ownership", "DRI"]
+  should_terms: ["responsible", "accountable"]
+  relevant_sources: ["engineering.md", "communication.md"]
+
+- q: "Best practices for code review communication"
+  must_terms: ["code review", "communication", "best practices"]
+  relevant_sources: ["engineering.md", "communication.md"]
+
+- q: "How to write issues with actionable detail"
+  must_terms: ["issues", "actionable", "detail"]
+  should_terms: ["labels", "milestones"]
+  relevant_sources: ["communication.md", "product.md"]
+
+- q: "Examples of results metrics in interviews"
+  must_terms: ["results", "metrics", "interview", "example"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]
+
+- q: "When to escalate and how to do it well"
+  must_terms: ["escalate", "how"]
+  should_terms: ["ownership", "communication"]
+  relevant_sources: ["communication.md", "engineering.md", "leadership.md"]
+
+- q: "Clarity vs brevity in written updates"
+  must_terms: ["clarity", "brevity", "written"]
+  should_terms: ["updates", "async"]
+  relevant_sources: ["communication.md"]
+
+- q: "Examples of iteration reducing risk"
+  must_terms: ["iteration", "risk", "example"]
+  relevant_sources: ["values.md", "engineering.md"]
+
+- q: "How to use examples in interviews effectively"
+  must_terms: ["examples", "interviews", "effective"]
+  should_terms: ["behavioral", "scenario"]
+  relevant_sources: ["wiki/values-influence-hiring"]
+
+- q: "Why publish the handbook publicly?"
+  must_terms: ["handbook", "public", "why"]
+  should_terms: ["transparency", "efficiency"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Signals of collaboration in cross-functional work"
+  must_terms: ["collaboration", "cross-functional", "signals"]
+  relevant_sources: ["values.md", "wiki/values-influence-hiring"]
+
+- q: "Reducing sync by improving issue templates"
+  must_terms: ["sync", "issue templates", "reduce"]
+  should_terms: ["checklist", "definition of done"]
+  relevant_sources: ["communication.md", "engineering.md", "product.md"]
+
+- q: "How to give specific negative feedback"
+  must_terms: ["negative feedback", "specific"]
+  should_terms: ["example", "behavior"]
+  relevant_sources: ["values.md", "communication.md"]
+
+- q: "Decision records: what to capture"
+  must_terms: ["decision record", "capture"]
+  should_terms: ["context", "tradeoff", "owner"]
+  relevant_sources: ["communication.md", "engineering.md"]
+
+- q: "Onboarding: values to emphasize first"
+  must_terms: ["onboarding", "values", "emphasize"]
+  should_terms: ["first week", "orientation"]
+  relevant_sources: ["values.md", "people-group.md"]
+
+- q: "Promotions: how values factor in"
+  must_terms: ["promotions", "values"]
+  should_terms: ["recognition", "reward"]
+  relevant_sources: ["values.md", "people-group.md"]
+
+- q: "Examples of transparency during incidents"
+  must_terms: ["transparency", "incidents", "example"]
+  should_terms: ["postmortem", "learning"]
+  relevant_sources: ["engineering.md", "communication.md", "values.md"]
+
+- q: "When to create a wiki page vs an issue"
+  must_terms: ["wiki page", "issue", "when"]
+  should_terms: ["reference", "discussion"]
+  relevant_sources: ["communication.md", "product.md", "wiki/values-influence-hiring"]
+
+- q: "Interview questions that reveal iteration mindset"
+  must_terms: ["interview", "iteration", "mindset", "questions"]
+  relevant_sources: ["wiki/values-influence-hiring", "values.md"]

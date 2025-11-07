@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
-mkdir -p mlflow_artifacts
-mlflow server \
---backend-store-uri file:./mlflow_artifacts \
---default-artifact-root file:./mlflow_artifacts \
---host 127.0.0.1 --port 5000
+set -euo pipefail
+
+# Always use the current working directory as the repo root (works reliably on Windows Git Bash / PowerShell)
+URI="$(python - <<'PY'
+import pathlib
+root = pathlib.Path.cwd()           # <— repo root if you run this script from the repo root
+mlruns = root / "mlruns"
+mlruns.mkdir(parents=True, exist_ok=True)
+print(mlruns.resolve().as_uri())
+PY
+)"
+
+echo "---------------------------------------------"
+echo " MLflow backend store:"
+echo "   $URI"
+echo " UI: http://127.0.0.1:5000"
+echo "---------------------------------------------"
+
+# Quick peek so you can confirm experiments are visible before opening the UI
+python - <<'PY'
+from pathlib import Path
+root = Path.cwd() / "mlruns"
+print("[UI] Using store:", root.resolve())
+for p in sorted(root.glob("**/meta.yaml")):
+    print("[UI] found:", p)
+PY
+
+# Start the UI against THIS exact store
+mlflow ui --backend-store-uri "$URI" --host 127.0.0.1 --port 5000

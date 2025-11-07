@@ -1,162 +1,147 @@
 # scripts/promote_or_rollback.py
-"""
-Promotion/rollback based on eval metrics and thresholds in configs/settings.yaml.
-- On promotion: copies current index/store into a timestamped snapshot dir and
-  writes data/index/production_paths.json to point to it. Logs to MLflow.
-- On rollback: switches pointer to the previous snapshot (if any). Logs to MLflow.
-
-Artifacts logged to MLflow:
-- data/eval/metrics.json
-- promoted snapshot files (handbook.index, docstore.json)
-"""
-
-import argparse, json, pathlib, shutil, time, re
+import sys, pathlib; sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+import argparse, json, shutil, time
+from pathlib import Path
 import mlflow
 from app.rag.utils import load_cfg
 
 CFG = load_cfg("configs/settings.yaml")
-TH = CFG.get("eval", {}).get("pass_thresholds", {"retrieval_hit_rate": 0.7})
 RET = CFG["retrieval"]
+EVAL = CFG.get("eval", {})
+TH = EVAL.get("pass_thresholds", {"retrieval_hit_rate": 0.7, "precision_at_k": 0.35, "mrr": 0.45})
+EXPERIMENT = CFG.get("mlflow", {}).get("experiment", "EKA_RAG")
 
-PROD_PTR = pathlib.Path("data/index/production_paths.json")
-SNAP_DIR = pathlib.Path("data/index")
+INDEX_PATH = Path(RET["faiss_index"])
+STORE_PATH = Path(RET["store_json"])
+IDX_DIR = Path("data/index")
+HISTORY_FILE = IDX_DIR / "history.json"
+PTR_FILE = IDX_DIR / "production_paths.json"
 
-def _snapshots():
-    patt = re.compile(r"^prod_snapshot_(\d+)$")
-    snaps = []
-    if SNAP_DIR.exists():
-        for d in SNAP_DIR.iterdir():
-            if d.is_dir():
-                m = patt.match(d.name)
-                if m:
-                    snaps.append((int(m.group(1)), d))
-    snaps.sort(key=lambda x: x[0])  # by timestamp asc
-    return snaps  # list of (ts, Path)
+def _mlflow_init():
+    abs_uri = Path("mlruns").resolve().as_uri()
+    mlflow.set_tracking_uri(abs_uri)
+    mlflow.set_experiment(EXPERIMENT)
+    print(f"[MLflow] tracking_uri={abs_uri}  experiment={EXPERIMENT}")
+    return abs_uri
 
-def load_metrics():
-    p = pathlib.Path("data/eval/metrics.json")
-    if not p.exists():
-        return {}
-    return json.loads(p.read_text(encoding="utf-8"))
+def load_metrics() -> dict:
+    p = Path("data/eval/metrics.json")
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
-def save_production_pointer(index_path: str, store_path: str):
+def read_pointer() -> dict:
+    return json.loads(PTR_FILE.read_text(encoding="utf-8")) if PTR_FILE.exists() else {}
+
+def write_pointer(index_path: str, store_path: str) -> dict:
     out = {"index_path": index_path, "store_path": store_path, "updated_at": int(time.time())}
-    SNAP_DIR.mkdir(parents=True, exist_ok=True)
-    PROD_PTR.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    IDX_DIR.mkdir(parents=True, exist_ok=True)
+    PTR_FILE.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return out
 
-def current_pointer():
-    if not PROD_PTR.exists():
-        return {}
-    try:
-        return json.loads(PROD_PTR.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+def read_history() -> list:
+    return json.loads(HISTORY_FILE.read_text(encoding="utf-8")) if HISTORY_FILE.exists() else []
 
-def promote():
-    # copy current index to a versioned folder (for audit)
-    ts = int(time.time())
-    ver_dir = SNAP_DIR / f"prod_snapshot_{ts}"
+def write_history(entries: list):
+    IDX_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+def create_snapshot() -> Path:
+    ver_dir = IDX_DIR / f"prod_snapshot_{int(time.time())}"
     ver_dir.mkdir(parents=True, exist_ok=True)
-    src_idx = pathlib.Path(RET["faiss_index"])
-    src_store = pathlib.Path(RET["store_json"])
-    if not src_idx.exists() or not src_store.exists():
-        raise FileNotFoundError("Index or store missing. Run build_index + eval first.")
-    dst_idx = ver_dir / "handbook.index"
-    dst_store = ver_dir / "docstore.json"
-    shutil.copy2(src_idx, dst_idx)
-    shutil.copy2(src_store, dst_store)
+    shutil.copy2(INDEX_PATH, ver_dir / "handbook.index")
+    shutil.copy2(STORE_PATH, ver_dir / "docstore.json")
+    return ver_dir
 
-    # update pointer
-    ptr = save_production_pointer(str(dst_idx), str(dst_store))
-    print(f"[promote] success → {ver_dir}")
+def thresholds_ok(m: dict) -> bool:
+    for k, thr in TH.items():
+        if float(m.get(k, 0.0)) < float(thr):
+            print(f"[promote] FAIL: {k}={m.get(k,0.0):.3f} < {thr:.3f}")
+            return False
+    return True
 
-    # log artifacts
-    try:
-        mlflow.log_artifact("data/eval/metrics.json")
-    except Exception:
-        pass
-    try:
-        mlflow.log_artifact(str(dst_idx))
-        mlflow.log_artifact(str(dst_store))
-    except Exception:
-        pass
-    mlflow.set_tag("promotion", "success")
-    mlflow.set_tag("snapshot_dir", ver_dir.name)
-    mlflow.set_tag("pointer_updated_at", str(ptr["updated_at"]))
+def log_common_artifacts():
+    for p in ["data/eval/metrics.json", "data/eval/metrics_detailed.json", str(PTR_FILE), str(HISTORY_FILE)]:
+        if Path(p).exists():
+            mlflow.log_artifact(p)
+
+def promote(force: bool = False):
+    uri = _mlflow_init()
+    metrics = load_metrics()
+    with mlflow.start_run(run_name=f"promote-{int(time.time())}"):
+        mlflow.set_tag("tracking_uri", uri)
+        mlflow.log_param("retrieval.embedder_model", RET.get("embedder_model"))
+        mlflow.log_param("retrieval.normalize", RET.get("normalize"))
+        mlflow.log_param("retrieval.hybrid_alpha", RET.get("hybrid_alpha"))
+        mlflow.log_param("eval.k", EVAL.get("k", RET.get("top_k")))
+        mlflow.log_param("thresholds", json.dumps(TH))
+
+        for k, v in metrics.items():
+            if isinstance(v, (int, float)): mlflow.log_metric(k, float(v))
+
+        ok = force or thresholds_ok(metrics)
+        mlflow.set_tag("action", "promote")
+        mlflow.set_tag("thresholds_ok", str(ok).lower())
+        prev_ptr = read_pointer()
+        from_ver = prev_ptr.get("index_path", "")
+
+        if ok:
+            snap = create_snapshot()
+            new_ptr = write_pointer(str(snap / "handbook.index"), str(snap / "docstore.json"))
+            hist = read_history()
+            hist.append({"snapshot_dir": str(snap),
+                         "index_path": new_ptr["index_path"],
+                         "store_path": new_ptr["store_path"],
+                         "ts": new_ptr["updated_at"]})
+            write_history(hist)
+            mlflow.set_tag("promotion", "success")
+            mlflow.set_tag("from_version", from_ver)
+            mlflow.set_tag("to_version", new_ptr["index_path"])
+            print(f"[promote] success → {snap}")
+        else:
+            mlflow.set_tag("promotion", "skipped")
+            mlflow.set_tag("from_version", from_ver)
+            mlflow.set_tag("to_version", from_ver)
+            print("[promote] thresholds not met → skipped")
+
+        log_common_artifacts()
 
 def rollback():
-    snaps = _snapshots()
-    if not snaps:
-        print("[rollback] no snapshots found")
-        mlflow.set_tag("rollback", "no_snapshots")
-        return
+    uri = _mlflow_init()
+    with mlflow.start_run(run_name=f"rollback-{int(time.time())}"):
+        mlflow.set_tag("tracking_uri", uri)
+        mlflow.set_tag("action", "rollback")
+        hist = read_history()
+        if not hist:
+            mlflow.set_tag("rollback", "no_history")
+            print("[rollback] no history → noop"); return
 
-    # Determine current snapshot (if pointer matches one), then pick the previous
-    ptr = current_pointer()
-    cur_snap = None
-    for ts, d in snaps[::-1]:  # newest first
-        if ptr.get("index_path", "").startswith(str(d)) or ptr.get("store_path", "").startswith(str(d)):
-            cur_snap = (ts, d)
-            break
+        cur = read_pointer()
+        cur_idx = None
+        for i, h in enumerate(hist):
+            if h.get("index_path") == cur.get("index_path") and h.get("store_path") == cur.get("store_path"):
+                cur_idx = i; break
 
-    if cur_snap:
-        # choose the snapshot immediately older than current
-        indices = [ts for ts, _ in snaps]
-        i = indices.index(cur_snap[0])
-        target = snaps[i - 1] if i - 1 >= 0 else None
-    else:
-        # no pointer or not matching → roll back to the newest snapshot
-        target = snaps[-1]
+        target_idx = (len(hist) - 2) if cur_idx is None else (cur_idx - 1)
+        if target_idx < 0:
+            mlflow.set_tag("rollback", "no_previous")
+            print("[rollback] already at oldest snapshot → noop")
+            log_common_artifacts(); return
 
-    if not target:
-        print("[rollback] no older snapshot to roll back to")
-        mlflow.set_tag("rollback", "no_older_snapshot")
-        return
+        target = hist[target_idx]
+        new_ptr = write_pointer(target["index_path"], target["store_path"])
+        mlflow.set_tag("rollback", "success")
+        mlflow.set_tag("from_version", cur.get("index_path",""))
+        mlflow.set_tag("to_version", new_ptr["index_path"])
+        print(f"[rollback] pointer → {new_ptr['index_path']}")
+        log_common_artifacts()
 
-    ts, d = target
-    idx = d / "handbook.index"
-    store = d / "docstore.json"
-    if not idx.exists() or not store.exists():
-        print(f"[rollback] snapshot incomplete: {d}")
-        mlflow.set_tag("rollback", "snapshot_incomplete")
-        return
-
-    ptr = save_production_pointer(str(idx), str(store))
-    print(f"[rollback] pointer → {d}")
-    mlflow.set_tag("rollback", "success")
-    mlflow.set_tag("snapshot_dir", d.name)
-    mlflow.set_tag("pointer_updated_at", str(ptr["updated_at"]))
-
-def main(mode: str):
-    metrics = load_metrics()
-    mlflow.set_tracking_uri(CFG.get("mlflow", {}).get("tracking_uri", "file:./mlruns"))
-    mlflow.set_experiment(CFG.get("mlflow", {}).get("experiment", "EKA_RAG"))
-
-    with mlflow.start_run(run_name=f"{mode}-{int(time.time())}"):
-        # log metrics if present
-        for k, v in metrics.items():
-            try:
-                mlflow.log_metric(k, float(v))
-            except Exception:
-                pass
-
-        if mode == "promote":
-            # check thresholds
-            ok = True
-            for k, thr in TH.items():
-                if float(metrics.get(k, 0.0)) < float(thr):
-                    ok = False
-                    print(f"[promote] {k} {float(metrics.get(k, 0.0)):.3f} < threshold {thr:.3f} → skip promotion")
-            if ok:
-                promote()
-        elif mode == "rollback":
-            rollback()
-        else:
-            print("Unknown mode. Use --mode promote|rollback")
+def main(mode: str, force: bool = False):
+    if mode == "promote": promote(force=force)
+    elif mode == "rollback": rollback()
+    else: print("Unknown mode. Use --mode promote|rollback")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["promote", "rollback"], required=True)
+    ap.add_argument("--force", action="store_true", help="Promote even if thresholds fail")
     args = ap.parse_args()
-    main(args.mode)
+    main(args.mode, force=args.force)

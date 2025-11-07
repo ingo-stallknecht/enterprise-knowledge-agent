@@ -6,11 +6,6 @@ retrieval:
   store_json: data/index/docstore.json
   hybrid_alpha: 0.6
 
-  # NEW — gentle, configurable boosts so fresh/wiki pages surface
-  wiki_boost: 0.25                # bonus added to hybrid score if source under data/processed/wiki/
-  recency_half_life_days: 14       # half-life for freshness; smaller = faster decay
-  recency_boost: 0.20              # max recency bonus for a just-created file
-
 chunk:
   max_chars: 1200
   overlap: 150
@@ -20,13 +15,22 @@ reranker:
   top_n: 30
 
 eval:
+  # File with evaluation questions; see template below.
+  questions_file: configs/eval_questions.yaml
+
+  # K used for metrics. You can override per run via CLI args if needed.
+  k: 12
+
+  # Promotion thresholds (all must pass):
   pass_thresholds:
-    retrieval_hit_rate: 0.70
+    retrieval_hit_rate: 0.70     # fraction of queries with >=1 relevant in top-k
+    precision_at_k: 0.35         # macro-avg (#relevant@k / k)
+    mrr: 0.45                    # mean reciprocal rank of first relevant
 
 mlflow:
   tracking_uri: "file:./mlruns"
   experiment: "EKA_RAG"
-  registered_model: "EKA_RAG_Index"
+  registered_model: "EKA_RAG_Index"   # used only for pointer naming/tags
 
 agent:
   auto_actions: false

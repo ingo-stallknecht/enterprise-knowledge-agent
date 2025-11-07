@@ -144,20 +144,27 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     return top_records, reranked, meta
 
 _SENT_SPLIT = re.compile(r'(?<=[\.\?!])\s+(?=[A-Z0-9])')
+
 def _split_sentences(text: str) -> List[str]:
     t = (text or "").strip()
-    if not t: return []
-    parts = _ SENT_SPLIT.split(t)  # noqa
+    if not t:
+        return []
+    parts = _SENT_SPLIT.split(t)
     out, buf = [], ""
     for p in parts:
         p = p.strip()
-        if not p: continue
-        if len(p) < 35 and buf: buf = f"{buf} {p}"
+        if not p:
+            continue
+        if len(p) < 35 and buf:
+            buf = f"{buf} {p}"
         else:
-            if buf: out.append(buf)
+            if buf:
+                out.append(buf)
             buf = p
-    if buf: out.append(buf)
+    if buf:
+        out.append(buf)
     return out
+
 
 def attribute(answer: str, records: List[Dict]) -> List[dict]:
     if not answer or not records: return []

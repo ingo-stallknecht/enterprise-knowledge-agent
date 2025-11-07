@@ -29,6 +29,13 @@ os.environ["HF_HOME"] = HF_CACHE
 os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
 os.environ["SENTENCE_TRANSFORMERS_HOME"] = HF_CACHE
 
+# --- make sure "app" package is importable on Streamlit Cloud ---
+import sys, pathlib
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# ---------------------------------------------------------------
+
 # ---- Local project imports (reuse your RAG modules) ----
 from app.rag.utils import ensure_dirs, load_cfg
 from app.rag.embedder import Embedder

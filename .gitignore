@@ -3,22 +3,18 @@
 __pycache__/
 *.pyc
 
-
-# Data & Artifacts
-/data/
-!/data/processed/wiki/
-/data/processed/wiki/*.md
-/mlflow_artifacts/
-
-
 # Local env
 .env
+*.env
 
+# Data & artifacts (don’t commit runtime data)
+data/
+mlruns/
+mlflow_artifacts/
 
 # Airflow
 airflow/logs/
 *.pid
 
-
-# OS
+# OS cruft
 .DS_Store

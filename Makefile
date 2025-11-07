@@ -1,12 +1,11 @@
-# Enterprise Knowledge Agent — Cross-platform Makefile (robust venv detection)
+# Local-only Makefile (with MLflow/Airflow hooks)
 
 .SILENT:
 .ONESHELL:
 SHELL := /usr/bin/sh
 
-.PHONY: init api airflow mlflow pipeline index ingest eval promote rollback test fmt test-api ui print-which
+.PHONY: init api ui airflow mlflow pipeline index ingest eval promote rollback test fmt print-which
 
-# Resolve venv executables (Windows Git Bash vs Unix)
 PYTHON := $(shell if [ -f .venv/Scripts/python.exe ]; then printf ".venv/Scripts/python.exe"; \
                    elif [ -f .venv/bin/python ]; then printf ".venv/bin/python"; \
                    else printf "python"; fi)
@@ -24,7 +23,10 @@ init:
 	python -m pip install -r requirements.txt
 
 api:
-	"$(PYTHON)" -m uvicorn app.server:app --reload --port 8000
+	"$(PYTHON)" -m uvicorn app.server:app --port 8000 --log-level info
+
+ui:
+	"$(STREAMLIT)" run app/streamlit_app.py
 
 airflow:
 	docker compose up airflow-init -d && \
@@ -40,13 +42,13 @@ index:
 	"$(PYTHON)" -m scripts.build_index
 
 eval:
-	"$(PYTHON)" scripts/eval_rag.py
+	"$(PYTHON)" -m scripts.eval_rag
 
 promote:
-	"$(PYTHON)" scripts/promote_or_rollback.py --mode promote
+	"$(PYTHON)" -m scripts.promote_or_rollback --mode promote
 
 rollback:
-	"$(PYTHON)" scripts/promote_or_rollback.py --mode rollback
+	"$(PYTHON)" -m scripts.promote_or_rollback --mode rollback
 
 pipeline: ingest index eval promote
 
@@ -55,9 +57,3 @@ test:
 
 fmt:
 	"$(PYTHON)" -m nltk.downloader punkt
-
-test-api:
-	"$(PYTHON)" scripts/test_api_local.py
-
-ui:
-	"$(STREAMLIT)" run app/streamlit_app.py

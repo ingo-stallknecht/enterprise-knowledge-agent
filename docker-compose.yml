@@ -1,46 +1,83 @@
 version: "3.9"
+
 services:
-airflow-webserver:
-image: apache/airflow:2.9.2
-environment:
-- AIRFLOW__CORE__LOAD_EXAMPLES=False
-- AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
-- AIRFLOW__CORE__EXECUTOR=LocalExecutor
-depends_on:
-- airflow-scheduler
-volumes:
-- ./airflow/dags:/opt/airflow/dags
-- ./:/repo
-ports:
-- "8080:8080"
-command: webserver
+  backend:
+    build: .
+    container_name: eka-backend
+    command: bash -lc "uvicorn app.server:app --host 0.0.0.0 --port 8000 --log-level info"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - VARIANT=${VARIANT:-local}               # local | dbx
+      # Backend-only secrets (set in .env, do NOT commit):
+      # OPENAI_API_KEY, BACKEND_API_TOKEN, AOAI_USE, AZURE_OPENAI_*,
+      # DBX_HOST, DBX_TOKEN, DBX_VS_ENDPOINT, AZURE_BLOB_*
+      # Optional: restrict CORS to your Streamlit URL
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
+    volumes:
+      - ./:/app
 
+  ui:
+    image: python:3.11-slim
+    container_name: eka-ui
+    working_dir: /app
+    command: bash -lc "pip install -r requirements.txt && python -m streamlit run app/streamlit_app.py --server.port 8501 --server.headless true"
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - DEMO_BACKEND_URL=${DEMO_BACKEND_URL:-http://backend:8000}
+      - DEMO_CLIENT_TOKEN=${DEMO_CLIENT_TOKEN:-}
+    volumes:
+      - ./:/app
+    depends_on:
+      - backend
 
-airflow-scheduler:
-image: apache/airflow:2.9.2
-environment:
-- AIRFLOW__CORE__LOAD_EXAMPLES=False
-- AIRFLOW__CORE__EXECUTOR=LocalExecutor
-volumes:
-- ./airflow/dags:/opt/airflow/dags
-- ./:/repo
-command: scheduler
+  airflow-webserver:
+    image: apache/airflow:2.9.2
+    container_name: eka-airflow-web
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+    depends_on:
+      - airflow-scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./:/repo
+    ports:
+      - "8080:8080"
+    command: webserver
 
+  airflow-scheduler:
+    image: apache/airflow:2.9.2
+    container_name: eka-airflow-scheduler
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./:/repo
+    command: scheduler
 
-airflow-init:
-image: apache/airflow:2.9.2
-entrypoint: /bin/bash
-command: -c "airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
-volumes:
-- ./airflow/dags:/opt/airflow/dags
+  airflow-init:
+    image: apache/airflow:2.9.2
+    container_name: eka-airflow-init
+    entrypoint: /bin/bash
+    command: -c "airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
 
-
-mlflow:
-image: ghcr.io/mlflow/mlflow:v2.14.3
-environment:
-- MLFLOW_TRACKING_URI=file:/repo/mlflow_artifacts
-volumes:
-- ./:/repo
-command: mlflow server --backend-store-uri file:/repo/mlflow_artifacts --default-artifact-root file:/repo/mlflow_artifacts --host 0.0.0.0 --port 5000
-ports:
-- "5000:5000"
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.3
+    container_name: eka-mlflow
+    environment:
+      MLFLOW_TRACKING_URI: file:/repo/mlflow_artifacts
+    volumes:
+      - ./:/repo
+    command: mlflow server --backend-store-uri file:/repo/mlflow_artifacts --default-artifact-root file:/repo/mlflow_artifacts --host 0.0.0.0 --port 5000
+    ports:
+      - "5000:5000"

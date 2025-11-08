@@ -4,6 +4,7 @@
 #   1) Create wiki → confirm → embed once, append to index, cache vectors+records per page
 #   2) Delete wiki → confirm → remove cached files, rebuild FAISS from cache (NO re-embedding)
 #   3) Otherwise → answer helpfully (no side effects)
+# About tab now lists all available .md files with size and preview.
 
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
@@ -844,6 +845,24 @@ with tab_upload:
                 st.success(f"✅ Refreshed index from cache; added {res['added_chunks']} chunks.")
 
 # ===== ABOUT =====
+def _list_md_files() -> List[Dict]:
+    """Return list of all .md files under data/processed (incl. wiki), with size and short preview."""
+    files = sorted(PROC_DIR.rglob("*.md"))
+    out = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        preview = (text.strip().splitlines() + [""])[:6]  # first ~6 lines
+        out.append({
+            "path": str(f).replace("\\","/"),
+            "name": f.name,
+            "kb": max(1, f.stat().st_size // 1024),
+            "preview": "\n".join(preview).strip()
+        })
+    return out
+
 with tab_about:
     st.markdown("### How this works")
     st.markdown("""
@@ -855,3 +874,12 @@ with tab_about:
 """)
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")
+
+    st.markdown("#### Current Markdown files")
+    md_list = _list_md_files()
+    if not md_list:
+        st.write("No Markdown files found yet.")
+    else:
+        for item in md_list:
+            with st.expander(f"{item['name']}  ·  ~{item['kb']} KB  ·  {item['path']}", expanded=False):
+                st.code(item["preview"] or "(empty)", language="markdown")

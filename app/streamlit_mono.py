@@ -60,12 +60,51 @@ for token_file in (HF_CACHE / "token", DOTCACHE / "token", DOTHF / "token"):
     except Exception:
         pass
 
-# LLM toggles
-os.environ["USE_OPENAI"] = _secret("USE_OPENAI", "true")
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-os.environ["OPENAI_MODEL"] = _secret("OPENAI_MODEL", "gpt-4o-mini")
-os.environ["OPENAI_MAX_DAILY_USD"] = _secret("OPENAI_MAX_DAILY_USD", "0.50")
+# --- OpenAI / LLM toggles (robust secret loading) ---
+def _find_secret_key() -> str:
+    candidates = [
+        "OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY",
+        "openai_api_key", "openai_key",
+    ]
+    try:
+        for k in candidates:
+            if k in st.secrets:
+                v = str(st.secrets[k]).strip()
+                if v:
+                    return v
+        for section in ("openai", "OPENAI", "llm"):
+            if section in st.secrets and isinstance(st.secrets[section], dict):
+                for k in ("api_key", "API_KEY", "key"):
+                    v = str(st.secrets[section].get(k, "")).strip()
+                    if v:
+                        return v
+    except Exception:
+        pass
+    for k in candidates:
+        v = str(os.getenv(k, "")).strip()
+        if v:
+            return v
+    return ""
+
+use_openai_flag = str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower() == "true"
+os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
+
+_openai_key = _find_secret_key()
+if _openai_key:
+    os.environ["OPENAI_API_KEY"] = _openai_key
+
+os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")))
+os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.50")))
+
+def _openai_diag() -> str:
+    use = os.environ.get("USE_OPENAI", "false").lower() == "true"
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    model = os.environ.get("OPENAI_MODEL", "")
+    if use and key:
+        return f"OpenAI: ON (key ✓, model {model})"
+    if use and not key:
+        return "OpenAI: ON (key missing ⚠)"
+    return "OpenAI: OFF"
 
 TOP_K = int(_secret("EKA_TOP_K", "12"))
 MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
@@ -119,7 +158,6 @@ class Prog:
         if label is None:
             self._pb.progress(int(value * 100))
         else:
-            # Streamlit 1.38 supports text= kw on .progress
             self._pb.progress(int(value * 100), text=label)
 
 # ---------------- Seed corpus (offline) ----------------
@@ -150,7 +188,6 @@ def write_seed_corpus() -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     for name, content in SEED_MD.items():
         (WIKI_DIR / name).write_text(content.strip() + "\n", encoding="utf-8")
-    # also mirror a couple directly under processed/ to diversify sources
     (PROC_DIR / "values.md").write_text(SEED_MD["values.md"], encoding="utf-8")
     (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
     return {"ok": True, "written": len(SEED_MD) + 2}
@@ -198,7 +235,6 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             ok += 1
             time.sleep(0.05)
         except Exception:
-            # best-effort: continue
             pass
     return {"ok": ok > 0, "downloaded": ok, "total": total}
 
@@ -218,57 +254,6 @@ st.markdown("""
 .cv-b3 { background:#ECFEFF; } .cv-b4 { background:#F0FDF4; }
 </style>
 """, unsafe_allow_html=True)
-
-def _openai_diag() -> str:
-    use = os.getenv("USE_OPENAI", "false").lower() == "true"
-    has_key = bool(os.getenv("OPENAI_API_KEY", ""))
-    if use and has_key:
-        return "OpenAI: ON (key ✓)"
-    if use and not has_key:
-        return "OpenAI: ON (key missing ⚠)"
-    return "OpenAI: OFF"
-
-# ---------------- Header ----------------
-st.markdown(
-    "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
-    f"<div class='small'>Runs fully inside Streamlit. {_openai_diag()}</div></div>"
-    "<div><span class='badge badge-ok'>Online</span></div></div>",
-    unsafe_allow_html=True
-)
-
-# ---------------- First-run bootstrap ----------------
-def corpus_stats() -> Dict:
-    files = list(PROC_DIR.rglob("*.md"))
-    n_files = len(files)
-    n_bytes = sum((f.stat().st_size for f in files), 0)
-    return {"files": n_files, "size_kb": int(n_bytes/1024)}
-
-def first_run_bootstrap():
-    """If no markdown present, attempt bootstrap; otherwise seed corpus."""
-    if have_any_markdown():
-        return
-
-    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
-    prog = Prog("Preparing…")
-
-    did_any = False
-    if AUTO_BOOTSTRAP:
-        # Try network bootstrap first
-        fetch_res = bootstrap_gitlab(progress=prog)
-        if fetch_res.get("ok"):
-            _ = rebuild_index(prog)
-            st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
-            did_any = True
-
-    if not did_any:
-        # Offline fallback: write seed corpus and build
-        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
-        write_seed_corpus()
-        _ = rebuild_index(prog)
-        st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
-
-# Trigger on load
-first_run_bootstrap()
 
 # ---------------- Models & index ----------------
 @st.cache_resource(show_spinner=False)
@@ -321,6 +306,7 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
                                 value=0.25 + 0.60*(e/max(1,len(texts))))
         X = np.vstack(vecs)
     else:
+        import numpy as np
         X = np.zeros((0, 384), dtype="float32")
 
     idx = load_or_init_index()
@@ -410,6 +396,42 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
             "preview": (txt[:280]+"…") if len(txt)>280 else txt
         })
     return cites
+
+# ---------------- Header (after helpers; no side-effects yet) ----------------
+st.markdown(
+    "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
+    f"<div class='small'>Runs fully inside Streamlit. {_openai_diag()}</div></div>"
+    "<div><span class='badge badge-ok'>Online</span></div></div>",
+    unsafe_allow_html=True
+)
+
+# ---------------- First-run bootstrap (now that functions exist) -------------
+def corpus_stats() -> Dict:
+    files = list(PROC_DIR.rglob("*.md"))
+    n_files = len(files)
+    n_bytes = sum((f.stat().st_size for f in files), 0)
+    return {"files": n_files, "size_kb": int(n_bytes/1024)}
+
+def first_run_bootstrap():
+    if have_any_markdown():
+        return
+    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
+    prog = Prog("Preparing…")
+    did_any = False
+    if AUTO_BOOTSTRAP:
+        fetch_res = bootstrap_gitlab(progress=prog)
+        if fetch_res.get("ok"):
+            _ = rebuild_index(prog)
+            st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
+            did_any = True
+    if not did_any:
+        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
+        write_seed_corpus()
+        _ = rebuild_index(prog)
+        st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
+
+# Call AFTER all defs are in place
+first_run_bootstrap()
 
 # ---------------- Tabs & UI ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])

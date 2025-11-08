@@ -3,7 +3,7 @@
 # - Instant start via prebuilt index (data/index/prebuilt/*) if present
 # - Incremental indexing on upload (no full rebuild)
 # - Polished UI (badges, KPIs, legend, pills)
-# - Agent: readable outputs, no debug noise, strong fallback synthesis
+# - Agent: readable outputs, no debug noise, strong synthesis
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -255,7 +255,6 @@ def get_models():
 @st.cache_resource(show_spinner=False)
 def load_or_init_index():
     idx = DocIndex(INDEX_PATH, STORE_PATH)
-    # If your DocIndex doesn't have .load(), remove this call; many versions lazy-load inside query_*.
     if hasattr(idx, "load"):
         try: idx.load()
         except Exception: pass
@@ -309,7 +308,6 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     records = [{"text": t, "source": source_path} for t in texts]
     idx = load_or_init_index()
     if progress: progress.update(label="Appending to index…", value=0.6)
-    # Requires DocIndex.add(); if unavailable, fall back to rebuild_index.
     if hasattr(idx, "add"):
         idx.add(vecs, records)
     else:
@@ -568,6 +566,47 @@ with tab_ask:
                     st.write(c['preview'])
 
 # ===== AGENT =====
+
+def _looks_like_sentence(s: str) -> bool:
+    s = s.strip()
+    if len(s) < 40 or len(s) > 220: return False
+    if s.startswith("#") or s.startswith(">"): return False
+    if re.search(r"\[(.*?)\]\(http", s): return False  # markdown link
+    if "http://" in s or "https://" in s: return False
+    if re.fullmatch(r"[A-Za-z\s]{0,30}", s): return False
+    return True
+
+def _dedupe_keep_order(strings: List[str]) -> List[str]:
+    seen, out = set(), []
+    for s in strings:
+        k = re.sub(r"[^a-z0-9]+"," ", s.lower()).strip()
+        if k and k not in seen:
+            seen.add(k); out.append(s)
+    return out
+
+def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 6) -> List[str]:
+    """Pick the most relevant, clean sentences across retrieved chunks."""
+    if not pairs: return []
+    qv = emb.encode([query])
+    cands, scores = [], []
+    for rec, _sc in pairs[:30]:
+        text = (rec.get("text") or "")
+        # Use sentence splitter to avoid headings
+        for s in _split_sentences(text):
+            s = s.strip()
+            if not _looks_like_sentence(s): continue
+            cands.append(s)
+    if not cands: return []
+    # Score by cosine with query
+    sv = emb.encode(cands)
+    import numpy as np
+    sim = (sv @ qv.T).reshape(-1)
+    # Keep top N, then de-dup lightly
+    idxs = np.argsort(-sim)[: max(12, max_points*2)]
+    best = [cands[i] for i in idxs]
+    best = _dedupe_keep_order(best)
+    return best[:max_points]
+
 def _clean_summary(text: str, max_len: int = 800) -> str:
     t = (text or "").strip()
     t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
@@ -586,24 +625,23 @@ def _make_wiki_template(topic: str, key_points: List[str]) -> str:
 ## TL;DR
 - {tldr}
 
-## Key principles
+## Key principles & behaviors
 {bullets}
 
-## Examples
-- Example: describe a behavior, link to evidence (issue/MR/doc)
-- Example: what “good” looks like; how to measure outcomes
+## Examples (fill with concrete evidence)
+- Add one example per behavior. Link to issue/MR/doc where the behavior is demonstrated.
+- Describe outcomes (metrics, customer impact, quality).
 
 ## References
 (These notes were derived from internal documents indexed by the agent.)
 """
 
-def _synthesize_from_keypoints(question: str, key_points: List[str], max_len: int = 800) -> str:
-    if not key_points:
+def _synthesize_from_points(question: str, points: List[str], max_len: int = 800) -> str:
+    if not points:
         return "No strong evidence found in the current corpus. Try seeding or bootstrapping the handbook."
-    # Avoid backslashes inside f-string expression by precomputing:
-    cleaned_q = re.sub(r"\?$", "", question or "")
+    cleaned_q = re.sub(r"\?$", "", (question or "").strip())
     intro = f"**Short answer to:** {cleaned_q}."
-    body = "\n".join(f"- {kp}" for kp in key_points[:8])
+    body = "\n".join(f"- {p}" for p in points[:8])
     txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
     return txt[:max_len].rstrip()
 
@@ -620,21 +658,16 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     answer, _ = generate_answer(records[:8], query, max_chars=750)
     cleaned = _clean_summary(answer, 750)
 
-    # 4) Build key points for synthesis + wiki
-    key_points = []
-    for rec, _sc in pairs[:8]:
-        t = (rec.get("text") or "").strip()
-        if not t: continue
-        sents = _split_sentences(t)
-        if sents: key_points.append(sents[0][:180].rstrip())
+    # 4) Extract strong key points (semantic, filtered, deduped)
+    emb, _ = get_models()
+    points = _extract_key_points(query, pairs, emb, max_points=6)
 
-    # Fallback if GPT returned weak output
-    if len(cleaned) < 80 or cleaned in {".", ""}:
-        cleaned = _synthesize_from_keypoints(query, key_points, max_len=750)
+    if len(cleaned) < 120 or cleaned in {".", ""}:
+        cleaned = _synthesize_from_points(query, points, max_len=750)
 
-    # 5) Wiki draft (deterministic)
+    # 5) Wiki draft (deterministic, clean)
     wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
-    wiki_content = _make_wiki_template(wiki_title, key_points)
+    wiki_content = _make_wiki_template(wiki_title, points)
 
     applied = []
     if auto_actions:
@@ -734,40 +767,4 @@ with tab_about:
 - **Incremental indexing**: uploads append vectors instead of full rebuilds.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    if c1.button("Rebuild index (full)"):
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-        stats = rebuild_index(Prog("Rebuilding…"))
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-        st.success(f"Rebuilt: {stats['num_chunks']} chunks from {stats['num_files']} files.")
-    if c2.button("Bootstrap (download)"):
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-        res = bootstrap_gitlab(progress=Prog("Bootstrapping…"))
-        if res.get("ok"):
-            stats = rebuild_index(Prog("Indexing fetched corpus…"))
-            st.success(f"Downloaded {res.get('downloaded',0)} pages; indexed {stats['num_chunks']} chunks.")
-        else:
-            st.error("Bootstrap failed (likely no internet or missing libs). Try 'Use seed corpus'.")
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-    if c3.button("Use seed corpus"):
-        write_seed_corpus()
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-        stats = rebuild_index(Prog("Indexing seed corpus…"))
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-        st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
-    if c4.button("Quick repair (seed + rebuild if empty)"):
-        res = ensure_ready_and_index(force_rebuild=True)
-        if res.get("rebuilt") or res.get("seeded"):
-            st.success("Quick repair complete.")
-        else:
-            st.info("Index already healthy.")
-    used_prebuilt = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists() and (PREBUILT_DIR.exists())
-    c5.metric("Prebuilt in use", "Yes" if used_prebuilt else "No")
-    stats_now = corpus_stats()
-    st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")
+    st.info("No actions here. Use the other tabs to ask questions, run the agent, or upload knowledge.")

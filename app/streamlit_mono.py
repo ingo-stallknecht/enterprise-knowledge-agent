@@ -1,7 +1,9 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (runs entirely inside Streamlit Cloud)
-# Offline-safe: if HTTP bootstrap fails, we fall back to a small built-in seed corpus.
-# Adds: prebuilt index boot, incremental indexing for uploads, clearer agent logs & clean wiki drafts.
+# - Instant start via prebuilt index (data/index/prebuilt/*) if available
+# - Incremental indexing on upload (no full rebuild)
+# - Polished UI inspired by local variant (badges, KPIs, legend, pills)
+# - Agent: clearer logs, deterministic synthesis, cleaner wiki drafts
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -104,15 +106,16 @@ def _openai_diag() -> str:
         return "OpenAI: ON (key missing ⚠)"
     return "OpenAI: OFF"
 
+# ---------- Settings ----------
 TOP_K = int(_secret("EKA_TOP_K", "12"))
 MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
 RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
 AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
-USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"  # new
+USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
 
-# Ensure the repo root (one level up) is importable
+# ---------- PY path ----------
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -137,7 +140,7 @@ NORMALIZE = bool(RET.get("normalize", True))
 ALPHA = float(RET.get("hybrid_alpha", 0.6))
 INDEX_PATH = RET.get("faiss_index", "data/index/handbook.index")
 STORE_PATH = RET.get("store_json", "data/index/docstore.json")
-PREBUILT_DIR = pathlib.Path("data/index/prebuilt")  # new
+PREBUILT_DIR = pathlib.Path("data/index/prebuilt")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
 ensure_dirs()  # also creates data/raw and data/processed/wiki
 
@@ -145,7 +148,28 @@ RAW_DIR = pathlib.Path("data/raw")
 PROC_DIR = pathlib.Path("data/processed")
 WIKI_DIR = PROC_DIR / "wiki"
 
-# ---------------- Progress wrapper (fixes Streamlit 1.38 API) ----------------
+# ---------------- CSS / UI chrome ----------------
+st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="✨", layout="wide")
+st.markdown("""
+<style>
+.header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.badge { border-radius: 999px; padding: 4px 10px; font-size: 0.85rem; border: 1px solid transparent; }
+.badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
+.badge-warm{ background:#FFF7ED; color:#9A3412; border-color:#FED7AA; }
+.badge-err { background:#FFF1F1; color:#B42318; border-color:#FECDCA; }
+.kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
+.small{font-size:0.92rem;color:#687076;}
+.cv-legend { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
+.cv-dot { width:10px; height:10px; display:inline-block; border-radius:999px; border:1px solid #d1d5db; }
+.cv-b1 { background:#FEE2E2; } .cv-b2 { background:#FEF9C3; } .cv-b3 { background:#ECFEFF; } .cv-b4 { background:#F0FDF4; }
+.cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px; border-radius:999px; border:1px solid #e5e7eb; font-size: 0.95rem; }
+.progress-wrap { display:flex; align-items:center; gap:8px; }
+.bar { width:140px; height:8px; border:1px solid #e5e7eb; border-radius:10px; overflow:hidden; background:#fafafa; }
+.bar > div { height:100%; background:#10b981; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- Progress wrapper ----------------
 class Prog:
     def __init__(self, initial_text: str = "Working…"):
         self._pb = st.progress(0, text=initial_text)
@@ -213,30 +237,13 @@ def _slug(url: str) -> str:
 def have_any_markdown() -> bool:
     return any(PROC_DIR.rglob("*.md"))
 
-def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
-    """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
-    if requests is None or md is None:
-        return {"ok": False, "error": "requests/markdownify not available"}
+def _scan_processed_files() -> List[pathlib.Path]:
+    return sorted(PROC_DIR.glob("**/*.md"))
 
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    PROC_DIR.mkdir(parents=True, exist_ok=True)
-
-    total = len(CURATED)
-    ok = 0
-    for i, url in enumerate(CURATED, 1):
-        try:
-            if progress:
-                progress.update(label=f"Fetching {i}/{total}: {url}", value=min(0.15, i/total * 0.15))
-            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
-            r.raise_for_status()
-            html = r.text
-            (RAW_DIR / f"{_slug(url)}.html").write_text(html, encoding="utf-8")
-            (PROC_DIR / f"{_slug(url)}.md").write_text(md(html), encoding="utf-8")
-            ok += 1
-            time.sleep(0.05)
-        except Exception:
-            pass
-    return {"ok": ok > 0, "downloaded": ok, "total": total}
+# ---------------- Embedding utils ----------------
+def _split_md(text: str) -> List[Dict]:
+    from app.rag.chunker import split_markdown
+    return list(split_markdown(text, **CHUNK_CFG))
 
 # ---------------- Prebuilt index loader ----------------
 def copy_prebuilt_if_available() -> bool:
@@ -253,24 +260,7 @@ def copy_prebuilt_if_available() -> bool:
         return True
     return False
 
-# ---------------- UI chrome ----------------
-st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
-st.markdown("""
-<style>
-.header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.badge { border-radius:999px; padding:4px 10px; font-size:0.85rem; border:1px solid transparent; }
-.badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
-.badge-warn{ background:#FFF7ED; color:#9A3412; border-color:#FED7AA; }
-.kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
-.small{font-size:0.92rem;color:#687076;}
-.cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px; border-radius:999px;
-           border:1px solid #e5e7eb; font-size:0.95rem; }
-.cv-b1 { background:#FEE2E2; } .cv-b2 { background:#FEF9C3; }
-.cv-b3 { background:#ECFEFF; } .cv-b4 { background:#F0FDF4; }
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- Models & index ----------------
+# ---------------- Models & Index resources ----------------
 @st.cache_resource(show_spinner=False)
 def get_models():
     emb = Embedder(EMB_MODEL, NORMALIZE)
@@ -288,12 +278,7 @@ def load_or_init_index():
     idx.load()
     return idx
 
-def _scan_processed_files() -> List[pathlib.Path]:
-    return sorted(PROC_DIR.glob("**/*.md"))
-
-def _split_md(text: str) -> List[Dict]:
-    return list(split_markdown(text, **CHUNK_CFG))
-
+# ---------------- Build & incremental index ----------------
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     """
     Full rebuild from all processed markdown files.
@@ -351,9 +336,7 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     emb, _ = get_models()
     vecs = emb.encode(texts)
 
-    # prepare records
     records = [{"text": t, "source": source_path} for t in texts]
-
     idx = load_or_init_index()
     if progress:
         progress.update(label="Appending to index…", value=0.6)
@@ -378,7 +361,8 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     reranked = raw
     rerank_used = False
     if use_reranker and rer is not None and candidates:
-        pairs = rer.rerank(query, candidates, top_k=max(k,1))
+        # Limit to avoid slow CE inference
+        pairs = rer.rerank(query, candidates[:30], top_k=max(k,1))
         reranked = [(rec, sc) for rec, sc in pairs]
         rerank_used = True
     top_records = [r for r,_ in reranked[:k]]
@@ -442,15 +426,55 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
-# ---------------- Header (after helpers; no side-effects yet) ----------------
+# ---------------- Header + status badge ----------------
+def _index_health() -> Tuple[str, str]:
+    # Simple health: if index files exist and ntotal>0 → ok; if we’re rebuilding → warm; else err
+    try:
+        idx = load_or_init_index()
+        ok = idx.size() > 0
+        if st.session_state.get("eka_busy"):
+            return "<span class='badge badge-warm'>Loading</span>", "warm"
+        return ("<span class='badge badge-ok'>Online</span>", "ok") if ok else ("<span class='badge badge-err'>Empty</span>", "err")
+    except Exception:
+        return "<span class='badge badge-err'>Offline</span>", "err"
+
 st.markdown(
-    "<div class='header-row'><div><h3>Enterprise Knowledge Agent (Streamlit-only)</h3>"
-    f"<div class='small'>Runs fully inside Streamlit. {_openai_diag()}</div></div>"
-    "<div><span class='badge badge-ok'>Online</span></div></div>",
+    "<div class='header-row'>"
+    "<div><h3>Enterprise Knowledge Agent</h3>"
+    f"<div class='small'>Ask in plain language. Agent plans, retrieves, answers, cites. {_openai_diag()}</div></div>"
+    "<div id='status-slot'></div></div>",
     unsafe_allow_html=True
 )
+_status_slot = st.empty()
+badge_html, _ = _index_health()
+_status_slot.markdown(f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>", unsafe_allow_html=True)
 
-# ---------------- First-run bootstrap (now that functions exist) -------------
+# ---------------- Bootstrap & ready checks ----------------
+def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
+    """Download curated GitLab pages → HTML, convert to Markdown, write to data/processed."""
+    if requests is None or md is None:
+        return {"ok": False, "error": "requests/markdownify not available"}
+
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROC_DIR.mkdir(parents=True, exist_ok=True)
+
+    total = len(CURATED)
+    ok = 0
+    for i, url in enumerate(CURATED, 1):
+        try:
+            if progress:
+                progress.update(label=f"Fetching {i}/{total}: {url}", value=min(0.15, i/total * 0.15))
+            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
+            r.raise_for_status()
+            html = r.text
+            (RAW_DIR / f"{_slug(url)}.html").write_text(html, encoding="utf-8")
+            (PROC_DIR / f"{_slug(url)}.md").write_text(md(html), encoding="utf-8")
+            ok += 1
+            time.sleep(0.02)
+        except Exception:
+            pass
+    return {"ok": ok > 0, "downloaded": ok, "total": total}
+
 def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
     n_files = len(files)
@@ -461,8 +485,9 @@ def first_run_bootstrap():
     """
     Priority:
       1) If prebuilt index exists → copy and load immediately (instant start)
-      2) Else try GitLab bootstrap (if AUTO_BOOTSTRAP)
-      3) Else seed corpus
+      2) Else if live index + files exist → keep
+      3) Else try GitLab bootstrap (if AUTO_BOOTSTRAP)
+      4) Else seed corpus
     """
     # 1) prebuilt
     if USE_PREBUILT:
@@ -470,7 +495,7 @@ def first_run_bootstrap():
         if did:
             return
 
-    # 2) already have files?
+    # 2) live ok?
     if have_any_markdown() and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
         return
 
@@ -481,43 +506,65 @@ def first_run_bootstrap():
         st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
         fetch_res = bootstrap_gitlab(progress=prog)
         if fetch_res.get("ok"):
+            st.session_state["eka_busy"] = True
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             _ = rebuild_index(prog)
             st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
             did_any = True
+            st.session_state["eka_busy"] = False
     if not did_any:
         st.info("Using built-in seed corpus.", icon="ℹ️")
         write_seed_corpus()
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         _ = rebuild_index(prog)
         st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
+        st.session_state["eka_busy"] = False
 
-# Self-heal guard: seed/rebuild/repair if needed
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     idx_files_ok = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()
 
     if not have_any_markdown():
         write_seed_corpus()
         prog = Prog("Indexing seed corpus…")
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": True, "rebuilt": True, "stats": stats}
 
     if force_rebuild or not idx_files_ok:
         prog = Prog("Rebuilding index…")
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
-    # tiny probe
+    # probe
     try:
+        from app.rag.embedder import Embedder as _E
         emb, _ = get_models()
         qv = emb.encode(["ping"])
         idx = load_or_init_index()
         has_any = idx.query_dense(qv, k=1)
         if not has_any:
             prog = Prog("Repairing empty index…")
+            st.session_state["eka_busy"] = True
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             stats = rebuild_index(prog)
+            st.session_state["eka_busy"] = False
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
             return {"seeded": False, "rebuilt": True, "stats": stats}
     except Exception:
         prog = Prog("Repairing index…")
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
@@ -526,36 +573,27 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
 first_run_bootstrap()
 _ = ensure_ready_and_index(force_rebuild=False)
 
-# ---------------- Tabs & UI ----------------
+# ---------------- Tabs ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
+# --- ASK ---
 with tab_ask:
-    st.markdown("**Answers from your local corpus (GitLab + uploads). Shows citations and sentence→source mapping.**")
+    st.markdown("**Finds relevant passages and answers strictly from them. Shows citations and a sentence-to-source map.**")
     q = st.text_area("Your question", height=100, placeholder="e.g., How are values applied in performance reviews?")
     max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
-    colA, colB = st.columns(2)
-    mode = colA.selectbox("Retrieval mode", ["hybrid","dense","sparse"],
-                          index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
-    use_rr = colB.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
+    c1, c2 = st.columns(2)
+    mode = c1.selectbox("Retrieval mode", ["hybrid","dense","sparse"],
+                        index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
+    use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
     if st.button("Get answer", type="primary"):
         if not q.strip():
             st.warning("Please enter a question.")
         else:
-            # Self-heal before retrieve
-            if not have_any_markdown():
-                st.info("No corpus found — seeding and indexing now…")
-                ensure_ready_and_index(force_rebuild=True)
-            else:
-                # If index files are missing or empty, rebuild
-                idx_missing = not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists()
-                if idx_missing:
-                    st.info("Index not found — rebuilding now…")
-                    ensure_ready_and_index(force_rebuild=True)
+            # Guard / heal
+            ensure_ready_and_index(force_rebuild=False)
 
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
-
-            # If still empty, force one rebuild as a last resort
             if len(pairs) == 0:
                 st.info("No sources returned — repairing index and retrying once…")
                 ensure_ready_and_index(force_rebuild=True)
@@ -563,11 +601,7 @@ with tab_ask:
 
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
 
-            st.subheader("Answer")
-            if not (ans or "").strip():
-                st.warning("No text returned. Try ‘About → Use seed corpus’ then press ‘Rebuild index’.")
-            else:
-                st.write(ans)
+            st.subheader("Answer"); st.write(ans or "No text returned.")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.markdown(f"<div class='kpi'>Sources: <b>{len(pairs[:TOP_K])}</b></div>", unsafe_allow_html=True)
@@ -575,27 +609,27 @@ with tab_ask:
             m3.markdown(f"<div class='kpi'>Latency: <b>{meta.get('retrieval_ms',0)} ms</b></div>", unsafe_allow_html=True)
             m4.markdown(f"<div class='kpi'>LLM: <b>{llm_meta.get('llm','extractive')}</b></div>", unsafe_allow_html=True)
 
+            # Legend + pills
             st.markdown("##### Why this answer: Context Visualizer")
+            st.markdown("<div class='cv-legend small'><span>Evidence strength:</span><span class='cv-dot cv-b1'></span><span class='small'>weak</span><span class='cv-dot cv-b2'></span><span class='small'>medium</span><span class='cv-dot cv-b3'></span><span class='small'>strong</span><span class='cv-dot cv-b4'></span><span class='small'>very strong</span></div>", unsafe_allow_html=True)
             def band(s): return 4 if s>=0.75 else 3 if s>=0.50 else 2 if s>=0.30 else 1
             def bcls(b): return {1:"cv-b1",2:"cv-b2",3:"cv-b3",4:"cv-b4"}[b]
             pills = []
             for row in attribute(ans, recs):
                 s = float(row.get("score",0))
                 sent = (row.get("sentence","") or "").strip()
-                src = row.get("best_source","")
-                rk = row.get("best_rank","-")
+                src = row.get("best_source",""); rk = row.get("best_rank","-")
                 title = f"Top source #{rk}\n{src}\n(score {s:.2f})"
                 pills.append(f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>")
             st.markdown("".join(pills), unsafe_allow_html=True)
 
             st.markdown("#### Sources")
             for c in fmt_citations(pairs, TOP_K):
-                with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"):
+                with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
                     st.write(c['preview'])
 
-# ---------------- Agent (clear logs + clean wiki drafts) ----------------
+# --- AGENT ---
 def _clean_summary(text: str, max_len: int = 700) -> str:
-    """Light scrub to avoid trashy/no-context artifacts from LLM output."""
     t = (text or "").strip()
     t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
     t = re.sub(r"\n{3,}", "\n\n", t)
@@ -604,16 +638,17 @@ def _clean_summary(text: str, max_len: int = 700) -> str:
     return t
 
 def _make_wiki_template(topic: str, key_points: List[str]) -> str:
-    bullets = "\n".join(f"- {kp}" for kp in key_points[:6])
+    bullets = "\n".join(f"- {kp}" for kp in key_points[:6]) if key_points else "- Add concrete principles from your domain."
+    tldr = key_points[0] if key_points else "Summary point from source context."
     return f"""# {topic}
 
 > Internal guide – drafted by the Knowledge Agent. Please review before publishing.
 
 ## TL;DR
-- {key_points[0] if key_points else "Summary point from source context."}
+- {tldr}
 
 ## Key principles
-{bullets if bullets else "- Add concrete principles from your domain."}
+{bullets}
 
 ## Examples
 - Example: describe a behavior, link to evidence (issue/MR/doc)
@@ -636,22 +671,23 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     trace.append({"step": 2, "action": "rewrite_query", "output": query})
     logs.append(f"Rewrote user goal to query: {query}")
 
-    records, pairs, _meta = retrieve(query, TOP_K, "hybrid", use_reranker=False)
+    # Retrieval (limit candidates to boost speed)
+    records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
     preview = [{"source": r.get("source"), "preview": (r.get("text","")[:200] + "…")} for r,_ in pairs[:6]]
     trace.append({"step": 3, "action": "retrieve", "results": preview})
     logs.append(f"Retrieved {len(pairs)} candidate chunks; using top {min(6,len(pairs))} for drafting.")
 
-    answer, _ = generate_answer(records, query, max_chars=900)
-    cleaned = _clean_summary(answer, 800)
+    # Draft answer (concise, higher signal)
+    answer, _ = generate_answer(records[:8], query, max_chars=750)
+    cleaned = _clean_summary(answer, 750)
     trace.append({"step": 4, "action": "draft", "output": cleaned})
     logs.append("Drafted a concise answer from retrieved context.")
 
-    # synthesize wiki draft from retrieved chunks (deterministic, structured)
+    # Synthesize wiki (deterministic, from retrieved sentences)
     key_points = []
     for rec, _sc in pairs[:6]:
         t = (rec.get("text") or "").strip()
         if not t: continue
-        # take first sentence-ish as a point
         p = _split_sentences(t)
         if p:
             key_points.append(p[0][:180].rstrip())
@@ -660,7 +696,6 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     trace.append({"step": 5, "action": "synthesize_wiki", "title": wiki_title, "len": len(wiki_content)})
     logs.append(f"Synthesized wiki draft with {len(key_points)} key points.")
 
-    # optional apply: upsert wiki draft and incremental index
     applied = []
     if auto_actions:
         WIKI_DIR.mkdir(parents=True, exist_ok=True)
@@ -671,7 +706,11 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         logs.append(f"Upserted wiki draft: {slug}.md")
 
         prog = Prog("Agent: embedding new draft (incremental)…")
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         _ = incremental_add(wiki_content, str(dst).replace("\\","/"), progress=prog)
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         logs.append("Incremental index updated with new draft.")
 
     confidence = 0.70 if len(cleaned) > 200 else 0.50
@@ -683,18 +722,25 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     return {"answer": cleaned, "trace": trace, "applied_actions": applied, "logs": logs}
 
 with tab_agent:
-    st.markdown("**Agent: plan → rewrite → retrieve → draft → synthesize wiki → critic.**")
-    msg = st.text_area("Goal or task", height=110,
-                       placeholder="e.g., Create an example-rich note on values in performance reviews; if gaps, propose a wiki draft.")
+    st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
+    msg = st.text_area("Goal or task", height=110, placeholder="e.g., Create an example-rich note on how values influence hiring. If gaps exist, propose a wiki draft.")
     auto = st.checkbox("Allow auto-actions (create wiki draft + incremental reindex)", value=False)
+
+    # Sidebar progress like local variant
+    prog_slot = st.sidebar.container()
+    prog_bar = prog_slot.progress(0, text="Idle")
+
     if st.button("Run agent", type="primary"):
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
-            status = st.status("Running agent…", expanded=True)
-            status.update(label="Rewriting query…", state="running")
+            st.session_state["eka_busy"] = True
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
+            prog_bar.progress(10, text="Planning & rewriting…")
             res = agent_run(msg, auto_actions=auto)
-            status.update(label="Agent finished.", state="complete")
+            prog_bar.progress(100, text="Done")
+            st.session_state["eka_busy"] = False
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
             st.subheader("Agent answer"); st.write(res.get("answer",""))
             st.markdown("#### What the agent did")
@@ -707,7 +753,8 @@ with tab_agent:
                 if step["action"] == "rewrite_query":
                     st.code(step.get("output",""))
                 elif step["action"] == "retrieve":
-                    for r in step.get("results", []): st.markdown(f"  • **{r['source']}** — {r['preview']}")
+                    for r in step.get("results", []):
+                        st.markdown(f"  • **{r['source']}** — {r['preview']}")
                 elif step["action"] in ("draft", "synthesize_wiki"):
                     st.code(step.get("output","") if "output" in step else f"title={step.get('title')} len={step.get('len')}")
                 elif step["action"] == "critic":
@@ -716,11 +763,12 @@ with tab_agent:
             if res.get("applied_actions"):
                 st.success(f"✅ Applied: {res['applied_actions']}")
 
+# --- UPLOAD ---
 with tab_upload:
-    st.markdown("**Upload `.md` or `.txt` — added to the knowledge base incrementally (no full rebuild).**")
+    st.markdown("**Adds plain-text or Markdown files to your knowledge base. They will be cited in answers.**")
     f = st.file_uploader("Upload a file", type=["md","txt"])
     ttl = st.text_input("Optional page title")
-    if st.button("Upload & index (incremental)"):
+    if st.button("Upload & update knowledge"):
         if not f:
             st.warning("Please select a file first.")
         else:
@@ -730,38 +778,54 @@ with tab_upload:
             text = f.getvalue().decode("utf-8", errors="ignore")
             dst = WIKI_DIR / f"{slug}.md"
             dst.write_text(text, encoding="utf-8")
+
+            st.session_state["eka_busy"] = True
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             prog = Prog("Incremental indexing…")
             res = incremental_add(text, str(dst).replace("\\","/"), progress=prog)
+            st.session_state["eka_busy"] = False
+            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
             st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
 
+# --- ABOUT ---
 with tab_about:
+    st.markdown("### How this works")
     st.markdown("""
-### Controls & status
-- **Rebuild index**: full re-embed of all `data/processed/**.md`
-- **Bootstrap (download)**: try fetching GitLab Handbook subset
-- **Use seed corpus**: write a small, built-in corpus
-- **Quick repair**: seed + rebuild if needed
-- **Prebuilt status**: show if a precomputed index was used on start
+- **Hybrid retrieval**: semantic + keyword (placeholder) for recall & precision.
+- **Reranker (optional)**: cross-encoder refines the top candidates.
+- **Q&A**: answers strictly from retrieved passages; cites sources.
+- **Context Visualizer**: each sentence maps to the strongest supporting passage.
+- **Incremental indexing**: uploads append vectors instead of full rebuilds.
+- **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
     c1, c2, c3, c4, c5 = st.columns(5)
     if c1.button("Rebuild index (full)"):
-        prog = Prog("Rebuilding…")
-        stats = rebuild_index(prog)
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
+        stats = rebuild_index(Prog("Rebuilding…"))
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         st.success(f"Rebuilt: {stats['num_chunks']} chunks from {stats['num_files']} files.")
     if c2.button("Bootstrap (download)"):
-        prog = Prog("Bootstrapping…")
-        res = bootstrap_gitlab(progress=prog)
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
+        res = bootstrap_gitlab(progress=Prog("Bootstrapping…"))
         if res.get("ok"):
-            stats = rebuild_index(prog)
+            stats = rebuild_index(Prog("Indexing fetched corpus…"))
             st.success(f"Downloaded {res.get('downloaded',0)} pages; indexed {stats['num_chunks']} chunks.")
         else:
             st.error("Bootstrap failed (likely no internet or missing libs). Try 'Use seed corpus'.")
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
     if c3.button("Use seed corpus"):
         write_seed_corpus()
-        prog = Prog("Indexing seed corpus…")
-        stats = rebuild_index(prog)
+        st.session_state["eka_busy"] = True
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
+        stats = rebuild_index(Prog("Indexing seed corpus…"))
+        st.session_state["eka_busy"] = False
+        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
-    if c4.button("Quick repair (seed + rebuild)"):
+    if c4.button("Quick repair (seed + rebuild if empty)"):
         res = ensure_ready_and_index(force_rebuild=True)
         if res.get("rebuilt") or res.get("seeded"):
             st.success("Quick repair complete.")

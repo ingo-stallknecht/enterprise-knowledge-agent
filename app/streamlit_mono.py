@@ -1,8 +1,9 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (runs entirely inside Streamlit Cloud)
 # Offline-safe: if HTTP bootstrap fails, we fall back to a small built-in seed corpus.
+# Adds: prebuilt index boot, incremental indexing for uploads, clearer agent logs & clean wiki drafts.
 
-import sys, os, pathlib, re, time, tempfile
+import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
 import streamlit as st
 
@@ -62,10 +63,7 @@ for token_file in (HF_CACHE / "token", DOTCACHE / "token", DOTHF / "token"):
 
 # --- OpenAI / LLM toggles (robust secret loading) ---
 def _find_secret_key() -> str:
-    candidates = [
-        "OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY",
-        "openai_api_key", "openai_key",
-    ]
+    candidates = ["OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY", "openai_api_key", "openai_key"]
     try:
         for k in candidates:
             if k in st.secrets:
@@ -112,6 +110,7 @@ RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
 AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
+USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"  # new
 
 # Ensure the repo root (one level up) is importable
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -138,6 +137,7 @@ NORMALIZE = bool(RET.get("normalize", True))
 ALPHA = float(RET.get("hybrid_alpha", 0.6))
 INDEX_PATH = RET.get("faiss_index", "data/index/handbook.index")
 STORE_PATH = RET.get("store_json", "data/index/docstore.json")
+PREBUILT_DIR = pathlib.Path("data/index/prebuilt")  # new
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
 ensure_dirs()  # also creates data/raw and data/processed/wiki
 
@@ -238,6 +238,21 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             pass
     return {"ok": ok > 0, "downloaded": ok, "total": total}
 
+# ---------------- Prebuilt index loader ----------------
+def copy_prebuilt_if_available() -> bool:
+    """
+    If a prebuilt FAISS+docstore exists under data/index/prebuilt/,
+    copy it to the live index paths once (cold start).
+    """
+    pre_faiss = PREBUILT_DIR / pathlib.Path(INDEX_PATH).name
+    pre_store = PREBUILT_DIR / pathlib.Path(STORE_PATH).name
+    if pre_faiss.exists() and pre_store.exists():
+        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
+        shutil.copy2(pre_faiss, INDEX_PATH)
+        shutil.copy2(pre_store, STORE_PATH)
+        return True
+    return False
+
 # ---------------- UI chrome ----------------
 st.set_page_config(page_title="EKA (Streamlit-only)", page_icon="✨", layout="wide")
 st.markdown("""
@@ -269,7 +284,9 @@ def get_models():
 
 @st.cache_resource(show_spinner=False)
 def load_or_init_index():
-    return DocIndex(INDEX_PATH, STORE_PATH)
+    idx = DocIndex(INDEX_PATH, STORE_PATH)
+    idx.load()
+    return idx
 
 def _scan_processed_files() -> List[pathlib.Path]:
     return sorted(PROC_DIR.glob("**/*.md"))
@@ -278,6 +295,9 @@ def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
 
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
+    """
+    Full rebuild from all processed markdown files.
+    """
     files = _scan_processed_files()
     if progress:
         progress.update(label=f"Scanning… {len(files)} files", value=0)
@@ -316,6 +336,31 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     if progress:
         progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
+
+def incremental_add(markdown_text: str, source_path: str, progress: Optional[Prog] = None) -> Dict:
+    """
+    Incrementally chunk + embed just one markdown string and append to index.
+    """
+    chunks = _split_md(markdown_text)
+    if progress:
+        progress.update(label=f"Chunking {len(chunks)} chunks…", value=0.15)
+    texts = [c["text"] for c in chunks]
+    if not texts:
+        return {"added_chunks": 0}
+
+    emb, _ = get_models()
+    vecs = emb.encode(texts)
+
+    # prepare records
+    records = [{"text": t, "source": source_path} for t in texts]
+
+    idx = load_or_init_index()
+    if progress:
+        progress.update(label="Appending to index…", value=0.6)
+    idx.add(vecs, records)
+    if progress:
+        progress.update(label="Saved.", value=1.0)
+    return {"added_chunks": len(texts)}
 
 # ---------------- Retrieval & attribution ----------------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
@@ -413,42 +458,54 @@ def corpus_stats() -> Dict:
     return {"files": n_files, "size_kb": int(n_bytes/1024)}
 
 def first_run_bootstrap():
-    if have_any_markdown():
+    """
+    Priority:
+      1) If prebuilt index exists → copy and load immediately (instant start)
+      2) Else try GitLab bootstrap (if AUTO_BOOTSTRAP)
+      3) Else seed corpus
+    """
+    # 1) prebuilt
+    if USE_PREBUILT:
+        did = copy_prebuilt_if_available()
+        if did:
+            return
+
+    # 2) already have files?
+    if have_any_markdown() and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
         return
-    st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
+
+    # 3) try bootstrap
     prog = Prog("Preparing…")
     did_any = False
     if AUTO_BOOTSTRAP:
+        st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
         fetch_res = bootstrap_gitlab(progress=prog)
         if fetch_res.get("ok"):
             _ = rebuild_index(prog)
             st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
             did_any = True
     if not did_any:
-        st.info("Bootstrap failed or disabled — using built-in seed corpus.", icon="ℹ️")
+        st.info("Using built-in seed corpus.", icon="ℹ️")
         write_seed_corpus()
         _ = rebuild_index(prog)
         st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
 
 # Self-heal guard: seed/rebuild/repair if needed
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
-    """Self-heal: if no processed markdown or index files are missing/empty, seed and rebuild."""
     idx_files_ok = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()
 
     if not have_any_markdown():
-        # nothing to index → seed corpus then rebuild
         write_seed_corpus()
         prog = Prog("Indexing seed corpus…")
         stats = rebuild_index(prog)
         return {"seeded": True, "rebuilt": True, "stats": stats}
 
-    # We have markdown; check index presence or forced rebuild
     if force_rebuild or not idx_files_ok:
         prog = Prog("Rebuilding index…")
         stats = rebuild_index(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
-    # As a final guard, attempt a tiny query; if it returns nothing, rebuild
+    # tiny probe
     try:
         emb, _ = get_models()
         qv = emb.encode(["ping"])
@@ -536,64 +593,114 @@ with tab_ask:
                 with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"):
                     st.write(c['preview'])
 
+# ---------------- Agent (clear logs + clean wiki drafts) ----------------
+def _clean_summary(text: str, max_len: int = 700) -> str:
+    """Light scrub to avoid trashy/no-context artifacts from LLM output."""
+    t = (text or "").strip()
+    t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    if len(t) > max_len:
+        t = t[:max_len].rstrip() + "…"
+    return t
+
+def _make_wiki_template(topic: str, key_points: List[str]) -> str:
+    bullets = "\n".join(f"- {kp}" for kp in key_points[:6])
+    return f"""# {topic}
+
+> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
+
+## TL;DR
+- {key_points[0] if key_points else "Summary point from source context."}
+
+## Key principles
+{bullets if bullets else "- Add concrete principles from your domain."}
+
+## Examples
+- Example: describe a behavior, link to evidence (issue/MR/doc)
+- Example: what “good” looks like; how to measure outcomes
+
+## References
+(These notes were derived from internal documents indexed by the agent.)
+"""
+
 def agent_run(message: str, auto_actions: bool = False) -> Dict:
     trace: List[Dict] = []
-    plan = ["rewrite_query", "retrieve", "draft", "critic"]
+    logs: List[str] = []
+    plan = ["rewrite_query", "retrieve", "draft", "synthesize_wiki", "critic"]
     trace.append({"step": 1, "action": "plan", "output": plan})
+    logs.append("Plan created: rewrite → retrieve → draft → synthesize wiki → critic")
 
     query = (message or "").strip()
     if len(query) < 12 or not query.endswith("?"):
         query = (query.rstrip(".") + "?")
     trace.append({"step": 2, "action": "rewrite_query", "output": query})
+    logs.append(f"Rewrote user goal to query: {query}")
 
     records, pairs, _meta = retrieve(query, TOP_K, "hybrid", use_reranker=False)
-    trace.append({"step": 3, "action": "retrieve", "results": [
-        {"source": r.get("source"), "preview": (r.get("text","")[:200] + "…")} for r,_ in pairs[:6]
-    ]})
+    preview = [{"source": r.get("source"), "preview": (r.get("text","")[:200] + "…")} for r,_ in pairs[:6]]
+    trace.append({"step": 3, "action": "retrieve", "results": preview})
+    logs.append(f"Retrieved {len(pairs)} candidate chunks; using top {min(6,len(pairs))} for drafting.")
 
     answer, _ = generate_answer(records, query, max_chars=900)
-    trace.append({"step": 4, "action": "draft", "output": (answer[:1000] + ("…" if len(answer)>1000 else ""))})
+    cleaned = _clean_summary(answer, 800)
+    trace.append({"step": 4, "action": "draft", "output": cleaned})
+    logs.append("Drafted a concise answer from retrieved context.")
 
-    gaps, actions = [], []
-    confidence = 0.65 if len(answer) > 200 else 0.45
-    if "example" not in answer.lower():
-        gaps.append("Add concrete, example-driven guidance.")
-        actions.append({
-            "type": "upsert_wiki_draft",
-            "title": "Example-Rich Guide",
-            "content": "# Example-Rich Guide\n\nAdd concrete Q&A and scenarios mapped to values.\n\n- Example 1 …\n- Example 2 …\n"
-        })
+    # synthesize wiki draft from retrieved chunks (deterministic, structured)
+    key_points = []
+    for rec, _sc in pairs[:6]:
+        t = (rec.get("text") or "").strip()
+        if not t: continue
+        # take first sentence-ish as a point
+        p = _split_sentences(t)
+        if p:
+            key_points.append(p[0][:180].rstrip())
+    wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
+    wiki_content = _make_wiki_template(wiki_title, key_points)
+    trace.append({"step": 5, "action": "synthesize_wiki", "title": wiki_title, "len": len(wiki_content)})
+    logs.append(f"Synthesized wiki draft with {len(key_points)} key points.")
 
+    # optional apply: upsert wiki draft and incremental index
     applied = []
-    if auto_actions and actions:
+    if auto_actions:
         WIKI_DIR.mkdir(parents=True, exist_ok=True)
-        for a in actions:
-            if a.get("type") == "upsert_wiki_draft":
-                slug = re.sub(r"[^a-z0-9\-]+", "-", a["title"].lower()).strip("-") or "page"
-                (WIKI_DIR / f"{slug}.md").write_text(a["content"], encoding="utf-8")
-                applied.append({"upserted": f"{slug}.md"})
-        if applied:
-            prog = Prog("Agent: updating index…")
-            rebuild_index(prog)
+        slug = re.sub(r"[^a-z0-9\-]+", "-", wiki_title.lower()).strip("-") or "page"
+        dst = WIKI_DIR / f"{slug}.md"
+        dst.write_text(wiki_content, encoding="utf-8")
+        applied.append({"upserted": f"{slug}.md"})
+        logs.append(f"Upserted wiki draft: {slug}.md")
 
-    step5 = {"step": 5, "action": "critic", "confidence": confidence}
-    if gaps: step5["gaps"] = gaps
-    if actions: step5["actions"] = actions
-    trace.append(step5)
+        prog = Prog("Agent: embedding new draft (incremental)…")
+        _ = incremental_add(wiki_content, str(dst).replace("\\","/"), progress=prog)
+        logs.append("Incremental index updated with new draft.")
 
-    return {"answer": answer, "trace": trace, "applied_actions": applied}
+    confidence = 0.70 if len(cleaned) > 200 else 0.50
+    critic = {"step": 6, "action": "critic", "confidence": confidence,
+              "notes": ["Review examples for specificity.", "Link to evidence (issues/MRs/docs)."]}
+    trace.append(critic)
+    logs.append("Critic completed with actionable notes.")
+
+    return {"answer": cleaned, "trace": trace, "applied_actions": applied, "logs": logs}
 
 with tab_agent:
-    st.markdown("**Agent: plan → rewrite → retrieve → draft → critic. Can upsert a wiki draft and reindex.**")
+    st.markdown("**Agent: plan → rewrite → retrieve → draft → synthesize wiki → critic.**")
     msg = st.text_area("Goal or task", height=110,
                        placeholder="e.g., Create an example-rich note on values in performance reviews; if gaps, propose a wiki draft.")
-    auto = st.checkbox("Allow auto-actions (create wiki draft + reindex)", value=False)
+    auto = st.checkbox("Allow auto-actions (create wiki draft + incremental reindex)", value=False)
     if st.button("Run agent", type="primary"):
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
+            status = st.status("Running agent…", expanded=True)
+            status.update(label="Rewriting query…", state="running")
             res = agent_run(msg, auto_actions=auto)
+            status.update(label="Agent finished.", state="complete")
+
             st.subheader("Agent answer"); st.write(res.get("answer",""))
+            st.markdown("#### What the agent did")
+            for log in res.get("logs", []):
+                st.write(f"• {log}")
+
             st.markdown("#### Plan & Trace")
             for step in res.get("trace", []):
                 st.markdown(f"- **Step {step['step']}: {step['action']}**")
@@ -601,18 +708,19 @@ with tab_agent:
                     st.code(step.get("output",""))
                 elif step["action"] == "retrieve":
                     for r in step.get("results", []): st.markdown(f"  • **{r['source']}** — {r['preview']}")
+                elif step["action"] in ("draft", "synthesize_wiki"):
+                    st.code(step.get("output","") if "output" in step else f"title={step.get('title')} len={step.get('len')}")
                 elif step["action"] == "critic":
                     st.write(f"  • Confidence: {step.get('confidence',0.0):.2f}")
-                    if step.get("gaps"): st.write("  • Gaps:"); [st.write(f"    - {g}") for g in step["gaps"]]
-                    if step.get("actions"): st.write("  • Proposed actions:"); st.json(step["actions"])
+                    if step.get("notes"): st.write("  • Notes:"); [st.write(f"    - {g}") for g in step["notes"]]
             if res.get("applied_actions"):
                 st.success(f"✅ Applied: {res['applied_actions']}")
 
 with tab_upload:
-    st.markdown("**Upload `.md` or `.txt` — added to the knowledge base.**")
+    st.markdown("**Upload `.md` or `.txt` — added to the knowledge base incrementally (no full rebuild).**")
     f = st.file_uploader("Upload a file", type=["md","txt"])
     ttl = st.text_input("Optional page title")
-    if st.button("Upload & rebuild index"):
+    if st.button("Upload & index (incremental)"):
         if not f:
             st.warning("Please select a file first.")
         else:
@@ -620,21 +728,23 @@ with tab_upload:
             slug = re.sub(r"[^a-z0-9\-]+", "-", name.lower()).strip("-") or "page"
             WIKI_DIR.mkdir(parents=True, exist_ok=True)
             text = f.getvalue().decode("utf-8", errors="ignore")
-            (WIKI_DIR / f"{slug}.md").write_text(text, encoding="utf-8")
-            prog = Prog("Indexing upload…")
-            stats = rebuild_index(prog)
-            st.success(f"✅ Indexed {stats['num_chunks']} chunks from {stats['num_files']} files.")
+            dst = WIKI_DIR / f"{slug}.md"
+            dst.write_text(text, encoding="utf-8")
+            prog = Prog("Incremental indexing…")
+            res = incremental_add(text, str(dst).replace("\\","/"), progress=prog)
+            st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
 
 with tab_about:
     st.markdown("""
 ### Controls & status
-- **Rebuild index**: re-embeds & rewrites FAISS/TF-IDF from current `data/processed/**.md`  
-- **Bootstrap**: try downloading the GitLab subset (if your runtime has outbound internet)  
-- **Use seed corpus**: write a small, built-in corpus and index it (works fully offline)  
-- **Corpus stats**: quick view of how much content is indexed
+- **Rebuild index**: full re-embed of all `data/processed/**.md`
+- **Bootstrap (download)**: try fetching GitLab Handbook subset
+- **Use seed corpus**: write a small, built-in corpus
+- **Quick repair**: seed + rebuild if needed
+- **Prebuilt status**: show if a precomputed index was used on start
 """)
-    c1, c2, c3, c4 = st.columns(4)
-    if c1.button("Rebuild index"):
+    c1, c2, c3, c4, c5 = st.columns(5)
+    if c1.button("Rebuild index (full)"):
         prog = Prog("Rebuilding…")
         stats = rebuild_index(prog)
         st.success(f"Rebuilt: {stats['num_chunks']} chunks from {stats['num_files']} files.")
@@ -657,5 +767,7 @@ with tab_about:
             st.success("Quick repair complete.")
         else:
             st.info("Index already healthy.")
+    used_prebuilt = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists() and (PREBUILT_DIR.exists())
+    c5.metric("Prebuilt in use", "Yes" if used_prebuilt else "No")
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

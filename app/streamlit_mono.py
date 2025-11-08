@@ -3,7 +3,7 @@
 # - Instant start via prebuilt index (data/index/prebuilt/*) if present
 # - Incremental indexing on upload (no full rebuild)
 # - Polished UI (badges, KPIs, legend, pills)
-# - Agent: readable outputs, no debug noise, strong synthesis
+# - Agent: readable outputs, deterministic synthesis, wiki preview shown
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -346,7 +346,7 @@ def _split_sentences(text: str) -> List[str]:
     for p in parts:
         p = p.strip()
         if not p: continue
-        if len(p) < 35 and buf:
+        if len(p) < 40 and buf:
             buf = f"{buf} {p}"
         else:
             if buf: out.append(buf)
@@ -569,11 +569,12 @@ with tab_ask:
 
 def _looks_like_sentence(s: str) -> bool:
     s = s.strip()
-    if len(s) < 40 or len(s) > 220: return False
+    if len(s) < 50 or len(s) > 240: return False
     if s.startswith("#") or s.startswith(">"): return False
     if re.search(r"\[(.*?)\]\(http", s): return False  # markdown link
     if "http://" in s or "https://" in s: return False
-    if re.fullmatch(r"[A-Za-z\s]{0,30}", s): return False
+    if not re.match(r"^[A-Z0-9].*[\.!\?]$", s): return False
+    if re.fullmatch(r"[A-Za-z\s]{0,35}", s): return False
     return True
 
 def _dedupe_keep_order(strings: List[str]) -> List[str]:
@@ -588,21 +589,18 @@ def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedd
     """Pick the most relevant, clean sentences across retrieved chunks."""
     if not pairs: return []
     qv = emb.encode([query])
-    cands, scores = [], []
+    cands = []
     for rec, _sc in pairs[:30]:
         text = (rec.get("text") or "")
-        # Use sentence splitter to avoid headings
         for s in _split_sentences(text):
-            s = s.strip()
-            if not _looks_like_sentence(s): continue
-            cands.append(s)
+            if _looks_like_sentence(s):
+                cands.append(s.strip())
     if not cands: return []
     # Score by cosine with query
     sv = emb.encode(cands)
     import numpy as np
     sim = (sv @ qv.T).reshape(-1)
-    # Keep top N, then de-dup lightly
-    idxs = np.argsort(-sim)[: max(12, max_points*2)]
+    idxs = np.argsort(-sim)[: max(12, max_points*3)]
     best = [cands[i] for i in idxs]
     best = _dedupe_keep_order(best)
     return best[:max_points]
@@ -636,18 +634,19 @@ def _make_wiki_template(topic: str, key_points: List[str]) -> str:
 (These notes were derived from internal documents indexed by the agent.)
 """
 
-def _synthesize_from_points(question: str, points: List[str], max_len: int = 800) -> str:
+def _synthesize_from_points(original_message: str, points: List[str], max_len: int = 800) -> str:
     if not points:
         return "No strong evidence found in the current corpus. Try seeding or bootstrapping the handbook."
-    cleaned_q = re.sub(r"\?$", "", (question or "").strip())
+    cleaned_q = re.sub(r"\?$", "", (original_message or "").strip())
     intro = f"**Short answer to:** {cleaned_q}."
     body = "\n".join(f"- {p}" for p in points[:8])
     txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
     return txt[:max_len].rstrip()
 
 def agent_run(message: str, auto_actions: bool = False) -> Dict:
-    # 1) Rewrite query (make it answerable)
-    query = (message or "").strip()
+    # 1) Rewrite query (make it answerable) — used for retrieval only
+    user_msg = (message or "").strip()
+    query = user_msg
     if len(query) < 12 or not query.endswith("?"):
         query = (query.rstrip(".") + "?")
 
@@ -662,26 +661,28 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     emb, _ = get_models()
     points = _extract_key_points(query, pairs, emb, max_points=6)
 
-    if len(cleaned) < 120 or cleaned in {".", ""}:
-        cleaned = _synthesize_from_points(query, points, max_len=750)
+    if len(cleaned) < 160 or cleaned in {".", ""}:
+        cleaned = _synthesize_from_points(user_msg, points, max_len=750)
 
     # 5) Wiki draft (deterministic, clean)
     wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
     wiki_content = _make_wiki_template(wiki_title, points)
 
     applied = []
+    created_path = None
     if auto_actions:
         WIKI_DIR.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9\-]+", "-", wiki_title.lower()).strip("-") or "page"
         dst = WIKI_DIR / f"{slug}.md"
         dst.write_text(wiki_content, encoding="utf-8")
         applied.append({"upserted": f"{slug}.md"})
+        created_path = str(dst).replace("\\","/")
 
         # Incremental embed of the new draft
         prog = Prog("Updating index…")
         st.session_state["eka_busy"] = True
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-        _ = incremental_add(wiki_content, str(dst).replace("\\","/"), progress=prog)
+        _ = incremental_add(wiki_content, created_path, progress=prog)
         st.session_state["eka_busy"] = False
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
@@ -691,10 +692,17 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         {"step": 2, "action": "retrieve", "used": min(8, len(pairs))},
         {"step": 3, "action": "draft", "chars": len(cleaned)},
         {"step": 4, "action": "synthesize_wiki", "title": wiki_title, "len": len(wiki_content)},
-        {"step": 5, "action": "critic", "confidence": 0.75 if len(cleaned) > 250 else 0.55,
+        {"step": 5, "action": "critic", "confidence": 0.78 if len(cleaned) > 260 else 0.58,
          "notes": ["Tighten examples for specificity.", "Link to issues/MRs/docs where possible."]},
     ]
-    return {"answer": cleaned, "trace": trace, "applied_actions": applied, "wiki_title": wiki_title, "wiki_len": len(wiki_content)}
+    return {
+        "answer": cleaned,
+        "trace": trace,
+        "applied_actions": applied,
+        "wiki_title": wiki_title,
+        "wiki_content": wiki_content,
+        "wiki_path": created_path
+    }
 
 with tab_agent:
     st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
@@ -731,6 +739,10 @@ with tab_agent:
 
             if res.get("applied_actions"):
                 st.success(f"Wiki page created and indexed: {res['applied_actions']}")
+                # Show the created page title + full content for immediate verification
+                with st.expander("Show created wiki page", expanded=True):
+                    st.markdown(f"**Title:** {res.get('wiki_title','')}")
+                    st.code(res.get("wiki_content",""), language="markdown")
 
 # ===== UPLOAD =====
 with tab_upload:
@@ -767,4 +779,4 @@ with tab_about:
 - **Incremental indexing**: uploads append vectors instead of full rebuilds.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
-    st.info("No actions here. Use the other tabs to ask questions, run the agent, or upload knowledge.")
+    # (No blue info box here by request)

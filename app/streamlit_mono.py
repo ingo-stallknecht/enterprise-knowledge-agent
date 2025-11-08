@@ -1,12 +1,12 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (Streamlit Cloud friendly)
 # Agent behaviors:
-#   (1) Explicit "create wiki/page/article" → propose title/content → ask to Confirm → create + reindex
-#   (2) Explicit "delete ..."               → show matching files → ask to Confirm → delete + reindex
+#   (1) Explicit "create wiki/page/article" → propose title/content → ask to Confirm → create + index
+#   (2) Explicit "delete ..."               → show matching files → ask to Confirm → delete + index
 #   (3) Otherwise                           → answer helpfully (no side effects)
 #
 # - Never acts without confirmation
-# - No tab jumping
+# - No tab jumping (no query param updates)
 # - Uses prebuilt index if present; repairs index if empty
 # - Incremental add is attempted; falls back to rebuild if unsupported
 
@@ -88,7 +88,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# default model: gpt-4o (can be overridden)
+# Default to gpt-4o (can be overridden)
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -169,6 +169,19 @@ class Prog:
         if value is None: value = self._last
         value = max(0.0, min(float(value), 1.0)); self._last = value
         self._pb.progress(int(value * 100), text=label if label is not None else None)
+
+# ---------- Flash helper (persist confirmations across reruns) ----------
+def flash(kind: str, msg: str):
+    st.session_state.setdefault("agent_flash", []).append((kind, msg))
+
+def show_and_clear_flashes():
+    if "agent_flash" in st.session_state and st.session_state["agent_flash"]:
+        for kind, msg in st.session_state["agent_flash"]:
+            if kind == "success": st.success(msg)
+            elif kind == "warning": st.warning(msg)
+            elif kind == "error": st.error(msg)
+            else: st.info(msg)
+        st.session_state["agent_flash"] = []
 
 # ---------- Seed corpus ----------
 SEED_MD: Dict[str, str] = {
@@ -487,17 +500,7 @@ copy_or_seed_then_index()
 _ = ensure_ready_and_index(False)
 
 # ---------- Tabs ----------
-try:
-    qp = st.query_params
-    get_qp = lambda k, default=None: qp.get(k, default)
-    set_qp = lambda **kw: st.query_params.update(kw)
-except Exception:
-    get_qp = lambda k, default=None: st.experimental_get_query_params().get(k, [default])[0]
-    set_qp = lambda **kw: st.experimental_set_query_params(**kw)
-st.session_state.setdefault("focus_tab", get_qp("tab", "ask"))
-
-tabs = st.tabs(["Ask", "Agent", "Upload", "About"])
-tab_ask, tab_agent, tab_upload, tab_about = tabs
+tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
 # ===== ASK =====
 with tab_ask:
@@ -510,7 +513,6 @@ with tab_ask:
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
     if st.button("Get answer", type="primary", key="ask_btn"):
-        set_qp(tab="ask")
         if not q.strip():
             st.warning("Please enter a question.")
         else:
@@ -572,7 +574,6 @@ def concise_title(title: str) -> str:
     t = re.sub(r"\?$", "", t)
     t = re.sub(r"^(create|write|make|draft|add)\s+", "", t, flags=re.I)
     if len(t) > 60: t = t[:57].rstrip() + "…"
-    # title case light
     def _tc(s):
         return " ".join(w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
                         for w in re.split(r"(\s+|\—)", s))
@@ -627,20 +628,10 @@ def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedd
         k = re.sub(r"[^a-z0-9]+", " ", cands[i].lower()).strip()
         if k and k not in seen:
             seen.add(k); out.append(cands[i])
-    # ensure time-boxing appears at least once if relevant
     if not any("time-box" in p.lower() or "time box" in p.lower() for p in out):
         out.insert(0, "Time-box feedback windows and collect input before the decision deadline.")
     return out[:max_points]
 
-# --- Keep focus on Agent tab
-def _stay_on_agent():
-    st.session_state["focus_tab"] = "agent"
-    try:
-        st.query_params.update({"tab":"agent"})
-    except Exception:
-        st.experimental_set_query_params(tab="agent")
-
-# --- Acting helpers ---
 def agent_apply_create_wiki(title: str, content: str) -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9\-]+", "-", title.lower()).strip("-") or "page"
@@ -648,7 +639,6 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     dst.write_text(content, encoding="utf-8")
     created_path = str(dst).replace("\\","/")
     prog = Prog("Updating index…")
-    # Try incremental; fall back to rebuild
     try:
         res = incremental_add(content, created_path, progress=prog)
     except Exception:
@@ -669,18 +659,18 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     stats = rebuild_index(prog)
     return {"deleted": deleted, "reindexed": stats}
 
-# ===== Agent UI =====
 with tab_agent:
-    _stay_on_agent()
     st.markdown("**Agent**")
     st.write("Type what you need. The agent will either (1) propose a new wiki page and ask to confirm, "
-             "(2) propose deletion candidates and ask to confirm, or (3) just answer helpfully. No actions without approval.")
+             "(2) propose deletion candidates and ask to confirm, or (3) just answer helpfully. "
+             "No actions happen without your approval.")
+    show_and_clear_flashes()
 
     msg = st.text_area("Goal or task", height=110,
                        placeholder="Examples: \"create a wiki page about values in performance reviews\" · \"delete values.md\" · or just ask a question")
 
+    # --- Run agent ---
     if st.button("Run", type="primary", key="agent_run_btn"):
-        _stay_on_agent()
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
@@ -698,11 +688,12 @@ with tab_agent:
                 st.subheader("Create wiki — confirmation required")
                 title_val = st.text_input("Title", value=title, key="agent_create_title")
                 st.code(content, language="markdown")
-                st.caption("This action will create a new Markdown file under data/processed/wiki/ and update the index.")
+                st.caption("This will create a new Markdown file under data/processed/wiki/ and update the index.")
                 if st.button("Confirm create page", key="agent_confirm_create"):
-                    _stay_on_agent()
                     res = agent_apply_create_wiki(title_val.strip() or title, content)
-                    st.success(f"Created and indexed: **{title_val.strip() or title}**  → {res['file']}")
+                    flash("success", f"Created and indexed: **{title_val.strip() or title}**  → `{res['file']}`")
+                    with st.expander("Details", expanded=False):
+                        st.json(res)
 
             elif intent == "delete_wiki":
                 st.subheader("Delete wiki — confirmation required")
@@ -718,9 +709,10 @@ with tab_agent:
                     sel = st.multiselect("Select files to delete", options=candidates, default=candidates[:1])
                     st.caption("Selected files will be permanently removed from disk. The index will then be rebuilt.")
                     if st.button("Confirm delete selected", key="agent_confirm_delete"):
-                        _stay_on_agent()
                         res = agent_apply_delete_wiki(sel)
-                        st.success(f"Deleted {len(res['deleted'])} file(s). Index rebuilt.")
+                        flash("success", f"Deleted **{len(res['deleted'])}** file(s) and rebuilt index.")
+                        with st.expander("Details", expanded=False):
+                            st.json(res)
 
             else:
                 # Helpful text answer (no side effects)
@@ -736,7 +728,6 @@ with tab_agent:
                     ans = joined[:900] if joined else "No relevant context found in the current corpus."
                 st.subheader("Agent answer")
                 st.write(ans)
-                # Light citations (optional)
                 st.markdown("#### Sources")
                 for c in fmt_citations(pairs, k=min(6, len(pairs))):
                     with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
@@ -748,7 +739,6 @@ with tab_upload:
     f = st.file_uploader("Upload a file", type=["md","txt"])
     ttl = st.text_input("Optional page title")
     if st.button("Upload & update knowledge", key="upload_btn"):
-        set_qp(tab="upload")
         if not f:
             st.warning("Please select a file first.")
         else:

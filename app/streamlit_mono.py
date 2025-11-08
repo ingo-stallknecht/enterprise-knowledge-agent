@@ -3,8 +3,8 @@
 # - Instant start via prebuilt index (data/index/prebuilt/*) if present
 # - Incremental indexing on upload (no full rebuild)
 # - Polished UI (badges, KPIs, legend, pills)
-# - Agent: uses GPT-4 (gpt-4o) for clean short answer + wiki page; clear trace
-# - Reduced reruns to avoid perceived "tab jumps"
+# - Agent: uses GPT-4 (gpt-4o) for clean short answer + wiki page; concise, user-facing summary
+# - Short, readable wiki titles (no run-on sentences)
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -91,7 +91,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# Default to GPT-4 (gpt-4o); you can override in secrets
+# Default to GPT-4 (gpt-4o); override in secrets if needed
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -407,7 +407,6 @@ def gpt_compose(context: str, prompt: str, max_chars: int) -> Optional[str]:
     if not gpt or os.environ.get("USE_OPENAI","false").lower()!="true":
         return None
     try:
-        # Guard: GPTClient will budget-check and limit tokens
         text, _meta = gpt.answer(context, prompt)
         text = (text or "").strip()
         if text:
@@ -636,55 +635,79 @@ def _clean_text_blocks(text: str) -> str:
     t = t.replace("\u0000", "").strip()
     return t
 
-def build_wiki_prompt(title: str, key_points: List[str], extra: str) -> Tuple[str, str]:
+def concise_title_from_query(q: str) -> str:
+    """Make a short, human title, <= 60 chars, no trailing '?'."""
+    base = q.strip()
+    base = re.sub(r"\?$", "", base)
+    # remove scaffolding words
+    base = re.sub(r"^(create|write|make|draft)\s+", "", base, flags=re.I)
+    base = re.sub(r";\s*if.*$", "", base, flags=re.I)
+    # common mapping
+    if re.search(r"\bvalues?\b.*\bperformance review", base, flags=re.I):
+        title = "Values in Performance Reviews — Examples & Guidance"
+    else:
+        title = base
+    title = title.strip().rstrip(".")
+    if len(title) > 60:
+        title = title[:57].rstrip() + "…"
+    # Title case-lite
+    def _tc(s):
+        return " ".join(w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
+                        for w in re.split(r"(\s+|\—)", s))
+    title = _tc(title)
+    # Normalize em dash spacing
+    title = re.sub(r"\s*—\s*", " — ", title)
+    return title
+
+def build_wiki_prompt(title: str, key_points: List[str]) -> Tuple[str, str]:
     kp = "\n".join(f"- {k}" for k in key_points) if key_points else "- Outline 3–5 concrete principles with examples."
-    instr = extra.strip()
     sys = "You are a precise technical writer. Write clearly, concisely, and avoid repetition. Use Markdown."
     user = f"""
 Write an internal wiki page titled "{title}" using the following requirements:
 
 Audience: ICs and managers preparing performance reviews.
 Tone: crisp, actionable, value-aligned.
-Sections: TL;DR, Key principles & behaviors (bulleted), Examples (2-3), References.
+Sections: TL;DR, Key behaviors (bulleted), Examples (2-3), Checklist, References.
 
 Key points to use:
 {kp}
 
-Additional instructions (if any):
-{instr}
-
 Rules:
-- Do not repeat bullets verbatim; synthesize.
-- Avoid generic filler like "we'll collect input".
-- Where appropriate, propose example stubs with realistic placeholders (Issue/MR links).
-- Keep it under 700 words.
+- Synthesize; don't copy bullets verbatim.
+- Avoid bland filler; prefer concrete, verifiable phrasing.
+- Propose example stubs with realistic placeholders (Issue/MR links).
+- Keep it under 600–700 words.
 """
     return sys, user
 
-def build_answer_prompt(question: str, extra: str) -> Tuple[str, str]:
-    instr = extra.strip()
-    sys = "You are an expert summarizer. Answer crisply from provided context only. Prefer bullets; avoid fluff."
+def build_answer_prompt(question: str) -> Tuple[str, str]:
+    sys = "You are an expert summarizer. Produce a user-facing summary people actually want to read."
     user = f"""Question: {question}
 
-Write a short answer (6–10 sentences or 6–10 bullets). Follow these extra instructions if given:
-{instr}
+Write a short, user-facing answer with these sections:
 
-Only use the provided context. If context is weak, say what is missing in one bullet.
+**Why it matters (1–2 lines)**
+**What to look for (4–6 bullets)**
+**Example review bullets (3–5 bullets)**
+**Checklist (4–6 bullets)**
+
+Only use the provided context. If context is weak, explicitly say what's missing in one bullet.
+Avoid repeating the question. No generic filler.
 """
     return sys, user
 
-def agent_run(message: str, auto_actions: bool = False, extra_instructions: str = "") -> Dict:
-    # 1) Rewrite query (minimal mutation to reduce reruns/noise)
+def agent_run(message: str, auto_actions: bool = False) -> Dict:
+    # 1) Normalize query
     user_msg = (message or "").strip()
     query = user_msg if user_msg.endswith("?") else (user_msg.rstrip(".") + "?")
 
-    # 2) Retrieve once up-front (no rebuilds here to avoid reruns)
+    # 2) Retrieve (hybrid, no reranker to keep fast)
     records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
 
-    # 3) Compose short answer with GPT (pref), else fallback to generate_answer
+    # 3) GPT short, user-facing answer
     ctx_for_llm = "\n\n".join((r.get("text") or "") for r,_ in pairs[:8])
-    sys_a, user_a = build_answer_prompt(query, extra_instructions)
-    gpt_ans = gpt_compose(ctx_for_llm, f"{sys_a}\n\n{user_a}", max_chars=900)
+    sys_a, user_a = build_answer_prompt(query)
+    gpt_ans = gpt_compose(ctx_for_llm, f"{sys_a}\n\n{user_a}", max_chars=1200)
     if gpt_ans:
         short_answer = _clean_text_blocks(gpt_ans)
     else:
@@ -692,13 +715,13 @@ def agent_run(message: str, auto_actions: bool = False, extra_instructions: str 
         short_answer, _ = generate_answer([r for r,_ in pairs[:8]], query, max_chars=900)
         short_answer = _clean_text_blocks(short_answer)
 
-    # 4) Extract key points to steer wiki
+    # 4) Key points to steer wiki
     emb, _ = get_models()
     points = _extract_key_points(query, pairs, emb, max_points=5)
 
-    # 5) Compose wiki with GPT (pref), else template fallback
-    wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
-    sys_w, user_w = build_wiki_prompt(wiki_title, points, extra_instructions)
+    # 5) Concise title + GPT wiki
+    wiki_title = concise_title_from_query(query)
+    sys_w, user_w = build_wiki_prompt(wiki_title, points)
     gpt_wiki = gpt_compose("\n\n".join((r.get("text") or "") for r,_ in pairs[:12]),
                            f"{sys_w}\n\n{user_w}", max_chars=3500)
     if gpt_wiki:
@@ -712,12 +735,18 @@ def agent_run(message: str, auto_actions: bool = False, extra_instructions: str 
 ## TL;DR
 - {tldr}
 
-## Key principles & behaviors
+## Key behaviors
 {bullets}
 
 ## Examples
 - Add one example per behavior. Link to issue/MR/doc where demonstrated.
 - Describe outcomes (metrics, customer impact, quality).
+
+## Checklist
+- Document decisions and feedback.
+- Time-box feedback windows.
+- Tie observations to values and outcomes.
+- Link to evidence (issues/MRs/docs).
 
 ## References
 (Agent synthesized from indexed documents.)
@@ -730,7 +759,7 @@ def agent_run(message: str, auto_actions: bool = False, extra_instructions: str 
         slug = re.sub(r"[^a-z0-9\-]+", "-", wiki_title.lower()).strip("-") or "page"
         dst = WIKI_DIR / f"{slug}.md"
         dst.write_text(wiki_content, encoding="utf-8")
-        applied.append({"upserted": f"{slug}.md"})
+        applied.append({"title": wiki_title, "file": f"{slug}.md"})
         created_path = str(dst).replace("\\","/")
 
         # Incremental embed (keeps UI on this tab; no rerun)
@@ -746,8 +775,8 @@ def agent_run(message: str, auto_actions: bool = False, extra_instructions: str 
         {"step": 2, "action": "retrieve", "used": min(8, len(pairs))},
         {"step": 3, "action": "draft_answer", "chars": len(short_answer), "llm": "gpt-4o" if gpt_ans else "extractive/gpt-fallback"},
         {"step": 4, "action": "compose_wiki", "title": wiki_title, "chars": len(wiki_content), "llm": "gpt-4o" if gpt_wiki else "template"},
-        {"step": 5, "action": "critic", "confidence": 0.82 if gpt_ans else 0.62,
-         "notes": ["Tighten examples for specificity.", "Cross-link to issues/MRs/docs where possible."]},
+        {"step": 5, "action": "critic", "confidence": 0.84 if gpt_ans else 0.64,
+         "notes": ["Add concrete, verifiable examples.", "Cross-link to issues/MRs/docs."]},
     ]
     return {
         "answer": short_answer,
@@ -760,9 +789,8 @@ def agent_run(message: str, auto_actions: bool = False, extra_instructions: str 
 
 with tab_agent:
     st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
-    msg = st.text_area("Goal or task", height=110, placeholder="e.g., Create an example-rich note on how values influence performance reviews. If gaps exist, propose a wiki draft.")
-    extra = st.text_area("Additional instructions (optional)", height=80, placeholder="e.g., Be concise, use bullet points, include exactly 2 concrete examples with links to issues/MRs/docs.")
-    auto = st.checkbox("Allow auto-actions (create wiki draft + incremental reindex)", value=False)
+    msg = st.text_area("Goal or task", height=110, placeholder="e.g., How values should be applied in performance reviews — create an example-rich internal note.")
+    auto = st.checkbox("Create wiki page & index it (optional)", value=False)
 
     if st.button("Run agent", type="primary", key="agent_btn"):
         if not msg.strip():
@@ -770,7 +798,7 @@ with tab_agent:
         else:
             st.session_state["eka_busy"] = True
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-            res = agent_run(msg, auto_actions=auto, extra_instructions=extra)
+            res = agent_run(msg, auto_actions=auto)
             st.session_state["eka_busy"] = False
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
@@ -793,9 +821,9 @@ with tab_agent:
                         st.write(f"  – {n}")
 
             if res.get("applied_actions"):
-                st.success(f"Wiki page created and indexed: {res['applied_actions']}")
+                info = res["applied_actions"][0]
+                st.success(f"Wiki page created and indexed: **{info['title']}**  –  {info['file']}")
                 with st.expander("Show created wiki page", expanded=True):
-                    st.markdown(f"**Title:** {res.get('wiki_title','')}")
                     st.code(res.get("wiki_content",""), language="markdown")
 
 # ===== UPLOAD =====

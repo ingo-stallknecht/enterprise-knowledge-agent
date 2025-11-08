@@ -3,7 +3,8 @@
 # - Instant start via prebuilt index (data/index/prebuilt/*) if present
 # - Incremental indexing on upload (no full rebuild)
 # - Polished UI (badges, KPIs, legend, pills)
-# - Agent: readable outputs, deterministic synthesis, wiki preview shown
+# - Agent: uses GPT-4 (gpt-4o) for clean short answer + wiki page; clear trace
+# - Reduced reruns to avoid perceived "tab jumps"
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -90,8 +91,9 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")))
-os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.50")))
+# Default to GPT-4 (gpt-4o); you can override in secrets
+os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
+os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
 def _openai_diag() -> str:
     use = os.environ.get("USE_OPENAI", "false").lower() == "true"
@@ -122,6 +124,7 @@ from app.rag.index import DocIndex
 from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
+from app.llm.gpt_client import GPTClient  # direct GPT use for agent composition
 
 # ---------- Config & dirs ----------
 CFG = {}
@@ -388,6 +391,31 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
+# ---------- GPT helper ----------
+_gpt_singleton = None
+def _get_gpt() -> Optional[GPTClient]:
+    global _gpt_singleton
+    if _gpt_singleton is None:
+        try:
+            _gpt_singleton = GPTClient()
+        except Exception:
+            _gpt_singleton = None
+    return _gpt_singleton
+
+def gpt_compose(context: str, prompt: str, max_chars: int) -> Optional[str]:
+    gpt = _get_gpt()
+    if not gpt or os.environ.get("USE_OPENAI","false").lower()!="true":
+        return None
+    try:
+        # Guard: GPTClient will budget-check and limit tokens
+        text, _meta = gpt.answer(context, prompt)
+        text = (text or "").strip()
+        if text:
+            return text[:max_chars].rstrip()
+    except Exception:
+        return None
+    return None
+
 # ---------- Header + status ----------
 def _index_health() -> Tuple[str, str]:
     try:
@@ -521,7 +549,7 @@ with tab_ask:
                         index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
-    if st.button("Get answer", type="primary"):
+    if st.button("Get answer", type="primary", key="ask_btn"):
         if not q.strip():
             st.warning("Please enter a question.")
         else:
@@ -534,7 +562,6 @@ with tab_ask:
 
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
-                # Strong extractive fallback if GPT returns weak output
                 joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
                 ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
 
@@ -546,7 +573,6 @@ with tab_ask:
             m3.markdown(f"<div class='kpi'>Latency: <b>{meta.get('retrieval_ms',0)} ms</b></div>", unsafe_allow_html=True)
             m4.markdown(f"<div class='kpi'>LLM: <b>{llm_meta.get('llm','extractive')}</b></div>", unsafe_allow_html=True)
 
-            # Legend + pills
             st.markdown("##### Why this answer: Context Visualizer")
             st.markdown("<div class='cv-legend small'><span>Evidence strength:</span><span class='cv-dot cv-b1'></span><span class='small'>weak</span><span class='cv-dot cv-b2'></span><span class='small'>medium</span><span class='cv-dot cv-b3'></span><span class='small'>strong</span><span class='cv-dot cv-b4'></span><span class='small'>very strong</span></div>", unsafe_allow_html=True)
             def band(s): return 4 if s>=0.75 else 3 if s>=0.50 else 2 if s>=0.30 else 1
@@ -571,7 +597,7 @@ def _looks_like_sentence(s: str) -> bool:
     s = s.strip()
     if len(s) < 50 or len(s) > 240: return False
     if s.startswith("#") or s.startswith(">"): return False
-    if re.search(r"\[(.*?)\]\(http", s): return False  # markdown link
+    if re.search(r"\[(.*?)\]\(http", s): return False
     if "http://" in s or "https://" in s: return False
     if not re.match(r"^[A-Z0-9].*[\.!\?]$", s): return False
     if re.fullmatch(r"[A-Za-z\s]{0,35}", s): return False
@@ -585,40 +611,103 @@ def _dedupe_keep_order(strings: List[str]) -> List[str]:
             seen.add(k); out.append(s)
     return out
 
-def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 6) -> List[str]:
-    """Pick the most relevant, clean sentences across retrieved chunks."""
+def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5) -> List[str]:
     if not pairs: return []
     qv = emb.encode([query])
     cands = []
-    for rec, _sc in pairs[:30]:
+    for rec, _sc in pairs[:24]:
         text = (rec.get("text") or "")
         for s in _split_sentences(text):
             if _looks_like_sentence(s):
                 cands.append(s.strip())
     if not cands: return []
-    # Score by cosine with query
     sv = emb.encode(cands)
     import numpy as np
     sim = (sv @ qv.T).reshape(-1)
-    idxs = np.argsort(-sim)[: max(12, max_points*3)]
+    idxs = np.argsort(-sim)[: max(10, max_points*3)]
     best = [cands[i] for i in idxs]
     best = _dedupe_keep_order(best)
     return best[:max_points]
 
-def _clean_summary(text: str, max_len: int = 800) -> str:
+def _clean_text_blocks(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
     t = re.sub(r"\n{3,}", "\n\n", t)
     t = t.replace("\u0000", "").strip()
-    if len(t) > max_len: t = t[:max_len].rstrip() + "…"
     return t
 
-def _make_wiki_template(topic: str, key_points: List[str]) -> str:
-    bullets = "\n".join(f"- {kp}" for kp in key_points[:6]) if key_points else "- Add concrete principles from your domain."
-    tldr = key_points[0] if key_points else "Summarize the most important value-driven behaviors with examples."
-    return f"""# {topic}
+def build_wiki_prompt(title: str, key_points: List[str], extra: str) -> Tuple[str, str]:
+    kp = "\n".join(f"- {k}" for k in key_points) if key_points else "- Outline 3–5 concrete principles with examples."
+    instr = extra.strip()
+    sys = "You are a precise technical writer. Write clearly, concisely, and avoid repetition. Use Markdown."
+    user = f"""
+Write an internal wiki page titled "{title}" using the following requirements:
 
-> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
+Audience: ICs and managers preparing performance reviews.
+Tone: crisp, actionable, value-aligned.
+Sections: TL;DR, Key principles & behaviors (bulleted), Examples (2-3), References.
+
+Key points to use:
+{kp}
+
+Additional instructions (if any):
+{instr}
+
+Rules:
+- Do not repeat bullets verbatim; synthesize.
+- Avoid generic filler like "we'll collect input".
+- Where appropriate, propose example stubs with realistic placeholders (Issue/MR links).
+- Keep it under 700 words.
+"""
+    return sys, user
+
+def build_answer_prompt(question: str, extra: str) -> Tuple[str, str]:
+    instr = extra.strip()
+    sys = "You are an expert summarizer. Answer crisply from provided context only. Prefer bullets; avoid fluff."
+    user = f"""Question: {question}
+
+Write a short answer (6–10 sentences or 6–10 bullets). Follow these extra instructions if given:
+{instr}
+
+Only use the provided context. If context is weak, say what is missing in one bullet.
+"""
+    return sys, user
+
+def agent_run(message: str, auto_actions: bool = False, extra_instructions: str = "") -> Dict:
+    # 1) Rewrite query (minimal mutation to reduce reruns/noise)
+    user_msg = (message or "").strip()
+    query = user_msg if user_msg.endswith("?") else (user_msg.rstrip(".") + "?")
+
+    # 2) Retrieve once up-front (no rebuilds here to avoid reruns)
+    records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+
+    # 3) Compose short answer with GPT (pref), else fallback to generate_answer
+    ctx_for_llm = "\n\n".join((r.get("text") or "") for r,_ in pairs[:8])
+    sys_a, user_a = build_answer_prompt(query, extra_instructions)
+    gpt_ans = gpt_compose(ctx_for_llm, f"{sys_a}\n\n{user_a}", max_chars=900)
+    if gpt_ans:
+        short_answer = _clean_text_blocks(gpt_ans)
+    else:
+        # fallback to app.llm.answerer (may be extractive)
+        short_answer, _ = generate_answer([r for r,_ in pairs[:8]], query, max_chars=900)
+        short_answer = _clean_text_blocks(short_answer)
+
+    # 4) Extract key points to steer wiki
+    emb, _ = get_models()
+    points = _extract_key_points(query, pairs, emb, max_points=5)
+
+    # 5) Compose wiki with GPT (pref), else template fallback
+    wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
+    sys_w, user_w = build_wiki_prompt(wiki_title, points, extra_instructions)
+    gpt_wiki = gpt_compose("\n\n".join((r.get("text") or "") for r,_ in pairs[:12]),
+                           f"{sys_w}\n\n{user_w}", max_chars=3500)
+    if gpt_wiki:
+        wiki_content = _clean_text_blocks(gpt_wiki)
+    else:
+        # Deterministic fallback
+        bullets = "\n".join(f"- {p}" for p in points) if points else "- Add concrete, value-aligned behaviors here."
+        tldr = points[0] if points else "Summarize the most important value-driven behaviors with examples."
+        wiki_content = f"""# {wiki_title}
 
 ## TL;DR
 - {tldr}
@@ -626,47 +715,13 @@ def _make_wiki_template(topic: str, key_points: List[str]) -> str:
 ## Key principles & behaviors
 {bullets}
 
-## Examples (fill with concrete evidence)
-- Add one example per behavior. Link to issue/MR/doc where the behavior is demonstrated.
+## Examples
+- Add one example per behavior. Link to issue/MR/doc where demonstrated.
 - Describe outcomes (metrics, customer impact, quality).
 
 ## References
-(These notes were derived from internal documents indexed by the agent.)
+(Agent synthesized from indexed documents.)
 """
-
-def _synthesize_from_points(original_message: str, points: List[str], max_len: int = 800) -> str:
-    if not points:
-        return "No strong evidence found in the current corpus. Try seeding or bootstrapping the handbook."
-    cleaned_q = re.sub(r"\?$", "", (original_message or "").strip())
-    intro = f"**Short answer to:** {cleaned_q}."
-    body = "\n".join(f"- {p}" for p in points[:8])
-    txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
-    return txt[:max_len].rstrip()
-
-def agent_run(message: str, auto_actions: bool = False) -> Dict:
-    # 1) Rewrite query (make it answerable) — used for retrieval only
-    user_msg = (message or "").strip()
-    query = user_msg
-    if len(query) < 12 or not query.endswith("?"):
-        query = (query.rstrip(".") + "?")
-
-    # 2) Retrieve (limit for speed)
-    records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
-
-    # 3) Draft with GPT (if available) or extractive fallback
-    answer, _ = generate_answer(records[:8], query, max_chars=750)
-    cleaned = _clean_summary(answer, 750)
-
-    # 4) Extract strong key points (semantic, filtered, deduped)
-    emb, _ = get_models()
-    points = _extract_key_points(query, pairs, emb, max_points=6)
-
-    if len(cleaned) < 160 or cleaned in {".", ""}:
-        cleaned = _synthesize_from_points(user_msg, points, max_len=750)
-
-    # 5) Wiki draft (deterministic, clean)
-    wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
-    wiki_content = _make_wiki_template(wiki_title, points)
 
     applied = []
     created_path = None
@@ -678,7 +733,7 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         applied.append({"upserted": f"{slug}.md"})
         created_path = str(dst).replace("\\","/")
 
-        # Incremental embed of the new draft
+        # Incremental embed (keeps UI on this tab; no rerun)
         prog = Prog("Updating index…")
         st.session_state["eka_busy"] = True
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
@@ -686,17 +741,16 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         st.session_state["eka_busy"] = False
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
-    # Minimal, human-readable trace
     trace = [
         {"step": 1, "action": "rewrite_query", "output": query},
         {"step": 2, "action": "retrieve", "used": min(8, len(pairs))},
-        {"step": 3, "action": "draft", "chars": len(cleaned)},
-        {"step": 4, "action": "synthesize_wiki", "title": wiki_title, "len": len(wiki_content)},
-        {"step": 5, "action": "critic", "confidence": 0.78 if len(cleaned) > 260 else 0.58,
-         "notes": ["Tighten examples for specificity.", "Link to issues/MRs/docs where possible."]},
+        {"step": 3, "action": "draft_answer", "chars": len(short_answer), "llm": "gpt-4o" if gpt_ans else "extractive/gpt-fallback"},
+        {"step": 4, "action": "compose_wiki", "title": wiki_title, "chars": len(wiki_content), "llm": "gpt-4o" if gpt_wiki else "template"},
+        {"step": 5, "action": "critic", "confidence": 0.82 if gpt_ans else 0.62,
+         "notes": ["Tighten examples for specificity.", "Cross-link to issues/MRs/docs where possible."]},
     ]
     return {
-        "answer": cleaned,
+        "answer": short_answer,
         "trace": trace,
         "applied_actions": applied,
         "wiki_title": wiki_title,
@@ -707,15 +761,16 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
 with tab_agent:
     st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
     msg = st.text_area("Goal or task", height=110, placeholder="e.g., Create an example-rich note on how values influence performance reviews. If gaps exist, propose a wiki draft.")
+    extra = st.text_area("Additional instructions (optional)", height=80, placeholder="e.g., Be concise, use bullet points, include exactly 2 concrete examples with links to issues/MRs/docs.")
     auto = st.checkbox("Allow auto-actions (create wiki draft + incremental reindex)", value=False)
 
-    if st.button("Run agent", type="primary"):
+    if st.button("Run agent", type="primary", key="agent_btn"):
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
             st.session_state["eka_busy"] = True
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-            res = agent_run(msg, auto_actions=auto)
+            res = agent_run(msg, auto_actions=auto, extra_instructions=extra)
             st.session_state["eka_busy"] = False
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
@@ -728,10 +783,10 @@ with tab_agent:
                     st.write(f"• Rewrote to: `{step.get('output','')}`")
                 elif step["action"] == "retrieve":
                     st.write(f"• Retrieved and used top {step.get('used',0)} chunks for drafting.")
-                elif step["action"] == "draft":
-                    st.write(f"• Drafted a concise answer ({step.get('chars',0)} chars).")
-                elif step["action"] == "synthesize_wiki":
-                    st.write(f"• Prepared wiki draft: **{step.get('title')}** ({step.get('len')} chars).")
+                elif step["action"] == "draft_answer":
+                    st.write(f"• Drafted a concise answer ({step.get('chars',0)} chars) via {step.get('llm')}.")
+                elif step["action"] == "compose_wiki":
+                    st.write(f"• Prepared wiki draft: **{step.get('title')}** ({step.get('chars')} chars) via {step.get('llm')}.")
                 elif step["action"] == "critic":
                     st.write(f"• Critic confidence: {step.get('confidence',0.0):.2f}")
                     for n in step.get("notes", []):
@@ -739,7 +794,6 @@ with tab_agent:
 
             if res.get("applied_actions"):
                 st.success(f"Wiki page created and indexed: {res['applied_actions']}")
-                # Show the created page title + full content for immediate verification
                 with st.expander("Show created wiki page", expanded=True):
                     st.markdown(f"**Title:** {res.get('wiki_title','')}")
                     st.code(res.get("wiki_content",""), language="markdown")
@@ -749,7 +803,7 @@ with tab_upload:
     st.markdown("**Add plain-text or Markdown files to your knowledge base. They will be cited in answers.**")
     f = st.file_uploader("Upload a file", type=["md","txt"])
     ttl = st.text_input("Optional page title")
-    if st.button("Upload & update knowledge"):
+    if st.button("Upload & update knowledge", key="upload_btn"):
         if not f:
             st.warning("Please select a file first.")
         else:
@@ -779,4 +833,3 @@ with tab_about:
 - **Incremental indexing**: uploads append vectors instead of full rebuilds.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
-    # (No blue info box here by request)

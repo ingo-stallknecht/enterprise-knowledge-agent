@@ -1,12 +1,15 @@
 # app/streamlit_mono.py
-# Streamlit-only Enterprise Knowledge Agent with vector cache and guarded mutations
+# Streamlit-only Enterprise Knowledge Agent with GPT-4 wiki drafting, safety filter,
+# guarded deletes (wiki folder only), and incremental indexing.
+#
 # Agent behaviors (confirmation required):
 #   1) Create wiki (only if clearly requested)
-#   2) Delete wiki (only if clearly requested)
+#   2) Delete wiki (only if clearly requested; restricted to wiki folder)
 #   3) Otherwise, answer helpfully (no side effects)
+#
 # Safety:
-#   - EKA_READ_ONLY="true" → disables create/delete
-#   - EKA_ADMIN_CODE="..."  → create/delete require this code
+#   - Harmful titles/content are blocked before creation.
+#   - Optional read-only demo mode: EKA_READ_ONLY="true" (disables create/delete).
 
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
@@ -21,6 +24,12 @@ try:
     import requests
 except Exception:
     requests = None
+
+# For direct GPT calls (wiki drafting)
+try:
+    from openai import OpenAI as _OpenAI
+except Exception:
+    _OpenAI = None
 
 def _secret(k, default=None):
     try: return st.secrets[k]
@@ -75,7 +84,10 @@ os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
 _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
-os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")))
+
+# Prefer GPT-4o for wiki drafting; respect user's model elsewhere
+DEFAULT_LLM_MODEL = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")))
+os.environ["OPENAI_MODEL"] = DEFAULT_LLM_MODEL
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
 def _openai_diag() -> str:
@@ -95,9 +107,8 @@ DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "tru
 AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
 USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
 
-# NEW: mutation guards
+# Optional read-only (kept for demos, no UI toggle)
 READ_ONLY = _secret("EKA_READ_ONLY", "false").lower() == "true"
-ADMIN_CODE = _secret("EKA_ADMIN_CODE", "").strip()
 
 # ---------- PY path ----------
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -584,7 +595,27 @@ def concise_title(title: str) -> str:
     t = re.sub(r"\s*—\s*", " — ", t)
     return t
 
-def render_wiki_md(title: str, key_points: List[str]) -> str:
+# ---------- Safety filters ----------
+_BLOCK_PATTERNS = [
+    r"\b(?:kill|suicide|self\-harm|cutting)\b",
+    r"\b(?:rape|sexual\s*violence|child\s*sexual|underage\s*sex|cp\b)\b",
+    r"\b(?:hate|slur|ethnic\s*cleansing|genocide)\b",
+    r"\b(?:terrorist\s*manual|bomb\s*making|explosive\s*recipe)\b",
+    r"\b(?:porn|explicit\s*sexual|bestiality)\b",
+    r"(?:\b(?:fuck|cunt|nigger|fag|retard)\b)",  # basic profanity/slurs
+]
+_BLOCK_RE = re.compile("|".join(_BLOCK_PATTERNS), re.I)
+
+def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
+    if not title.strip():
+        return False, "Title is empty."
+    if len(title) > 120:
+        return False, "Title too long."
+    if _BLOCK_RE.search(title) or _BLOCK_RE.search(content or ""):
+        return False, "Title or content appears to contain harmful or disallowed content."
+    return True, ""
+
+def render_wiki_md_template(title: str, key_points: List[str]) -> str:
     bullets = "\n".join(f"- {p}" for p in key_points) if key_points else "- Add specific behaviors and links to evidence."
     tldr = key_points[0] if key_points else "Summarize the most important value-driven behaviors with examples."
     return f"""# {title}
@@ -639,6 +670,49 @@ def extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedde
         out.insert(0, "Time-box feedback windows and collect input before the decision deadline.")
     return out[:max_points]
 
+# ---------- GPT-4 wiki drafting ----------
+def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:
+    """Use GPT-4o if available; otherwise fallback to configured model; if no client/key, return None."""
+    if not (_OpenAI and os.environ.get("OPENAI_API_KEY", "").strip() and os.environ.get("USE_OPENAI","false")=="true"):
+        return None
+    model_try = "gpt-4o"
+    # If user configured a different capable model, we still try gpt-4o first; if it fails, use configured.
+    client = _OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    bullets = "\n".join(f"- {p}" for p in key_points) if key_points else ""
+    system = (
+        "You are a helpful documentation writer for an internal engineering handbook. "
+        "You produce clean, concise, safe Markdown pages with:\n"
+        "H1 title, TL;DR, Key behaviors (bulleted), Examples, Checklist, References.\n"
+        "The page MUST be safe: no hate, sexual content, self-harm, or instructions for violence/illicit acts.\n"
+        "No filler. Keep it practical. No 'via GPT' mentions."
+    )
+    user = (
+        f"Write a wiki page titled: '{preferred_title}'.\n\n"
+        f"User request/context: {query}\n\n"
+        f"Key points to incorporate (if relevant):\n{bullets}\n\n"
+        "Ensure feedback is time-boxed and collected before deadlines.\n"
+        "Return ONLY the Markdown content of the page."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model_try, temperature=0.3, max_tokens=900,
+            messages=[{"role":"system","content":system},{"role":"user","content":user}]
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        return text or None
+    except Exception:
+        # Fallback to configured model
+        try:
+            resp = client.chat.completions.create(
+                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                temperature=0.3, max_tokens=900,
+                messages=[{"role":"system","content":system},{"role":"user","content":user}]
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            return text or None
+        except Exception:
+            return None
+
 def agent_apply_create_wiki(title: str, content: str) -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9\-]+", "-", title.lower()).strip("-") or "page"
@@ -649,10 +723,20 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     res = incremental_add(content, created_path, progress=prog)
     return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
 
+def _is_in_wiki_folder(p: pathlib.Path) -> bool:
+    try:
+        p.resolve().relative_to(WIKI_DIR.resolve())
+        return True
+    except Exception:
+        return False
+
 def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     deleted_paths = []
     for f in selected_files:
         p = pathlib.Path(f)
+        # Restrict deletes to wiki folder
+        if not _is_in_wiki_folder(p):
+            continue
         try:
             if p.exists():
                 p.unlink()
@@ -667,8 +751,9 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
 # ===== Agent tab =====
 with tab_agent:
     st.markdown("**Agent**")
-    st.write("The agent can: (1) propose & create wiki pages, (2) delete pages, or (3) answer normally. "
-             "Create/delete always require your confirmation.")
+    st.write("The agent can: (1) propose & create wiki pages, (2) delete pages (wiki folder only), or (3) answer normally. "
+             "Create/delete always require your confirmation. New pages are drafted with GPT-4 when available.")
+
     if READ_ONLY:
         st.info("Read-only mode is ON. Creating or deleting pages is disabled.", icon="ℹ️")
 
@@ -676,7 +761,7 @@ with tab_agent:
     agent_result = st.container()
     state = st.session_state["agent_state"]
 
-    # Main agent form
+    # Main agent form (keeps Run button near the input; no tab jumps)
     with st.form("agent_main_form", clear_on_submit=False):
         msg = st.text_area(
             "Goal or task",
@@ -684,12 +769,9 @@ with tab_agent:
             placeholder='e.g., create a wiki page "Values in Performance Reviews" · delete values.md · or just ask a question',
             key="agent_msg",
         )
-        admin_code_input = st.text_input(
-            "Admin code (required for create/delete)", type="password",
-            value="", help="Set EKA_ADMIN_CODE to require this; leave empty if not configured."
-        )
         submitted_run = st.form_submit_button("Run", type="primary")
 
+    # Intent regexes are above; run logic here
     if submitted_run:
         text = (msg or "").strip()
         if not text:
@@ -697,39 +779,39 @@ with tab_agent:
         else:
             intent, info = classify_intent(text)
 
-            # Guard mutations
-            def _mutations_allowed() -> Tuple[bool, str]:
-                if READ_ONLY:
-                    return False, "Read-only mode: create/delete are disabled."
-                if ADMIN_CODE:
-                    if not admin_code_input or admin_code_input != ADMIN_CODE:
-                        return False, "Invalid or missing admin code."
-                return True, ""
-
             if intent == "create_wiki":
-                ok, why = _mutations_allowed()
-                if not ok:
-                    with agent_result: st.error(why)
+                if READ_ONLY:
+                    with agent_result: st.error("Create denied: read-only mode is enabled.")
                 else:
                     # Build proposal
+                    ensure_ready_and_index(False)
                     query = text if text.endswith("?") else (text.rstrip(".") + "?")
                     recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
                     emb, _ = get_models()
                     points = extract_key_points(query, pairs, emb, max_points=5)
                     title = concise_title(info.get("title") or "Untitled")
-                    content = render_wiki_md(title, points)
+
+                    # Draft with GPT-4 if possible; fallback to template
+                    draft = gpt_generate_wiki_md(title, query, points)
+                    if draft is None or not draft.strip():
+                        draft = render_wiki_md_template(title, points)
+
+                    ok, why = is_safe_text(title, draft)
+                    if not ok:
+                        with agent_result: st.error(f"Blocked by safety filter: {why}")
+                        st.stop()
+
                     state.update({
                         "mode": "create_proposed",
                         "proposed_title": title,
-                        "proposed_content": content,
+                        "proposed_content": draft,
                         "delete_candidates": [],
                         "last_message": text
                     })
 
             elif intent == "delete_wiki":
-                ok, why = _mutations_allowed()
-                if not ok:
-                    with agent_result: st.error(why)
+                if READ_ONLY:
+                    with agent_result: st.error("Delete denied: read-only mode is enabled.")
                 else:
                     q = (info.get("query") or "").lower()
                     cands = []
@@ -744,10 +826,10 @@ with tab_agent:
                         "last_message": text
                     })
                     if not cands:
-                        with agent_result: st.info("No matching wiki files found.")
+                        with agent_result: st.info("No matching wiki files found in the wiki folder.")
 
             else:
-                # Helpful answer
+                # Helpful answer (no side effects)
                 ensure_ready_and_index(False)
                 recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
                 if len(pairs) == 0:
@@ -770,14 +852,18 @@ with tab_agent:
     if state["mode"] == "create_proposed":
         st.subheader("Create wiki — confirmation required")
         with st.form("agent_create_confirm", clear_on_submit=False):
-            title_val = st.text_input("Title", value=state["proposed_title"])
+            title_val = st.text_input("Title", value=state["proposed_title"], max_chars=120)
             st.code(state["proposed_content"], language="markdown")
+            # re-check safety on edited title/content
+            ok2, why2 = is_safe_text(title_val, state["proposed_content"])
+            if not ok2:
+                st.error(f"Blocked by safety filter: {why2}")
             c1, c2 = st.columns(2)
-            confirm_create = c1.form_submit_button("Confirm create page")
+            confirm_create = c1.form_submit_button("Confirm create page", disabled=not ok2)
             cancel_create  = c2.form_submit_button("Cancel")
         if confirm_create:
-            if READ_ONLY or (ADMIN_CODE and not admin_code_input == ADMIN_CODE):
-                st.error("Create denied: read-only or invalid admin code.")
+            if READ_ONLY:
+                st.error("Create denied: read-only mode is enabled.")
             else:
                 res = agent_apply_create_wiki(title_val.strip() or state["proposed_title"], state["proposed_content"])
                 st.success(f"Created and indexed: **{res['file']}**")
@@ -792,7 +878,7 @@ with tab_agent:
 
     # DELETE confirm
     if state["mode"] == "delete_proposed":
-        st.subheader("Delete wiki — confirmation required")
+        st.subheader("Delete wiki — confirmation required (wiki folder only)")
         if not state["delete_candidates"]:
             with st.form("agent_delete_close"):
                 close_btn = st.form_submit_button("Close")
@@ -801,7 +887,7 @@ with tab_agent:
         else:
             with st.form("agent_delete_confirm", clear_on_submit=False):
                 sel = st.multiselect(
-                    "Select files to delete",
+                    "Select files to delete (restricted to data/processed/wiki/)",
                     options=state["delete_candidates"],
                     default=state["delete_candidates"][:1],
                 )
@@ -809,8 +895,8 @@ with tab_agent:
                 confirm_delete = d1.form_submit_button("Confirm delete selected")
                 cancel_delete  = d2.form_submit_button("Cancel")
             if confirm_delete:
-                if READ_ONLY or (ADMIN_CODE and not admin_code_input == ADMIN_CODE):
-                    st.error("Delete denied: read-only or invalid admin code.")
+                if READ_ONLY:
+                    st.error("Delete denied: read-only mode is enabled.")
                 else:
                     res = agent_apply_delete_wiki(sel)
                     st.success(f"Deleted **{res['num_deleted']}** file(s).")
@@ -870,7 +956,7 @@ with tab_about:
 - **Q&A** answers strictly from retrieved passages with citations.
 - **Vector cache**: deletes never re-embed; we rebuild FAISS from cached vectors only.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` to skip first-run builds.
-- **Safety**: set `EKA_READ_ONLY="true"` for demos, or set `EKA_ADMIN_CODE` to require a passcode for create/delete.
+- **Safety**: harmful titles/content are blocked; deletes are restricted to the wiki folder.
 """)
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

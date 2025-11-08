@@ -3,10 +3,9 @@
 # - Prebuilt index support for instant start (data/index/prebuilt/*)
 # - Incremental indexing on upload (no full rebuild)
 # - Polished UI (badges, KPIs, pills)
-# - Agent outputs human-centric text; adds time-boxed feedback guidance
-# - No "via gpt-4o" phrasing anywhere
-# - Agent checkbox: "Allow agent to make automatic actions (create wiki & index)"
-# - Preserves ?tab=agent in query params to reduce tab "jump" on rerun
+# - Agent outputs human-centric text and includes time-boxed feedback guidance
+# - Checkbox: "Allow agent to make automatic actions (e.g., create wiki and index)"
+# - Keeps focus on Agent tab by preserving ?tab=agent on any Agent interaction
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -93,7 +92,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# Default to gpt-4o (internally); we never print "via gpt-4o" in UI
+# Default to gpt-4o internally (UI never mentions the model vendor/version)
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -126,7 +125,7 @@ from app.rag.index import DocIndex
 from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
-from app.llm.gpt_client import GPTClient  # internal, but UI never mentions model
+from app.llm.gpt_client import GPTClient  # internal; UI doesn’t expose details
 
 # ---------- Config & dirs ----------
 CFG = {}
@@ -536,8 +535,7 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
 first_run_bootstrap()
 _ = ensure_ready_and_index(False)
 
-# ---------- Tabs ----------
-# Preserve desired tab in query params to reduce "jump"
+# ---------- Tabs & param helpers ----------
 try:
     qp = st.query_params  # Streamlit >=1.31
     get_qp = lambda k, default=None: qp.get(k, default)
@@ -546,7 +544,9 @@ except Exception:
     get_qp = lambda k, default=None: st.experimental_get_query_params().get(k, [default])[0]
     set_qp = lambda **kw: st.experimental_set_query_params(**kw)
 
-initial_tab = get_qp("tab", "ask")
+# Initialize preferred tab state
+st.session_state.setdefault("focus_tab", get_qp("tab", "ask"))
+
 tabs = st.tabs(["Ask", "Agent", "Upload", "About"])
 tab_ask, tab_agent, tab_upload, tab_about = tabs
 
@@ -561,6 +561,7 @@ with tab_ask:
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
     if st.button("Get answer", type="primary", key="ask_btn"):
+        st.session_state["focus_tab"] = "ask"
         set_qp(tab="ask")
         if not q.strip():
             st.warning("Please enter a question.")
@@ -706,6 +707,28 @@ Avoid repeating the question. No generic filler.
 """
     return sys, user
 
+from app.llm.gpt_client import GPTClient  # already imported; re-affirm for type hints
+
+_gpt_singleton = None
+def _get_gpt():
+    global _gpt_singleton
+    if _gpt_singleton is None:
+        try: _gpt_singleton = GPTClient()
+        except Exception: _gpt_singleton = None
+    return _gpt_singleton
+
+def gpt_compose(context: str, prompt: str, max_chars: int) -> Optional[str]:
+    gpt = _get_gpt()
+    if not gpt or os.environ.get("USE_OPENAI","false").lower()!="true":
+        return None
+    try:
+        text, _meta = gpt.answer(context, prompt)
+        text = (text or "").strip()
+        if text: return text[:max_chars].rstrip()
+    except Exception:
+        return None
+    return None
+
 def agent_run(message: str, auto_actions: bool = False) -> Dict:
     # 1) Normalize query
     user_msg = (message or "").strip()
@@ -727,7 +750,6 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     # 4) Key points to steer wiki
     emb, _ = get_models()
     points = _extract_key_points(query, pairs, emb, max_points=5)
-    # Ensure time-box bullet is present
     if not any("time-box" in p.lower() or "time box" in p.lower() for p in points):
         points = ["Time-box feedback windows and collect input before the decision deadline."] + points
 
@@ -798,19 +820,44 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         "wiki_path": created_path
     }
 
+# Keep helpers to force Agent tab on Agent interactions
+def _stay_on_agent():
+    st.session_state["focus_tab"] = "agent"
+    set_qp(tab="agent")
+
 with tab_agent:
-    st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
+    # Always assert Agent tab focus during render of Agent UI (reduces “jump” perception)
+    _stay_on_agent()
+
+    # Short “how to use” + ROI list
+    st.markdown("**What the agent does**")
+    st.write(
+        "The agent rewrites your goal into a sharp query, retrieves evidence from your corpus, "
+        "drafts a short answer you can paste into reviews, and (optionally) composes a clean internal wiki page. "
+        "It always reminds reviewers to time-box feedback and collect it before the decision deadline."
+    )
+    st.markdown("**Key functionalities with high ROI**")
+    st.write(
+        "- Turn vague prompts into review-ready bullets\n"
+        "- Generate concise, value-aligned guidance with examples\n"
+        "- Create internal wiki pages for reuse and onboarding\n"
+        "- Incrementally index new content without full rebuilds"
+    )
+
     msg = st.text_area("Goal or task", height=110, placeholder="e.g., Values in performance reviews — create an example-rich internal note.")
-    auto = st.checkbox("Allow agent to make automatic actions (create wiki & index)", value=False)
+    # Checkbox that never causes a tab jump: we pin ?tab=agent when it changes
+    def _auto_actions_changed():
+        _stay_on_agent()
+    auto = st.checkbox("Allow agent to make automatic actions (e.g., create wiki and index)", value=False, on_change=_auto_actions_changed, key="agent_auto_actions")
 
     if st.button("Run agent", type="primary", key="agent_btn"):
-        set_qp(tab="agent")
+        _stay_on_agent()
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
             st.session_state["eka_busy"] = True
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-            res = agent_run(msg, auto_actions=auto)
+            res = agent_run(msg, auto_actions=st.session_state.get("agent_auto_actions", False))
             st.session_state["eka_busy"] = False
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 

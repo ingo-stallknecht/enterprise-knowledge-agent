@@ -1,19 +1,18 @@
 # app/streamlit_mono.py
-# Streamlit-only Enterprise Knowledge Agent with vector cache (fast deletes)
-# Agent behaviors:
-#   1) Create wiki → proposes title/content → confirm form → embed once + append (no full rebuild)
-#   2) Delete wiki → lists matches → confirm form → remove cached files → rebuild FAISS from cache (no re-embed)
-#   3) Otherwise → answer helpfully (no side effects)
-# UX fixes:
-#   - Agent uses forms → no double-click, buttons stay under inputs
-#   - No "index details" shown
-#   - No tab jumps
+# Streamlit-only Enterprise Knowledge Agent with vector cache and guarded mutations
+# Agent behaviors (confirmation required):
+#   1) Create wiki (only if clearly requested)
+#   2) Delete wiki (only if clearly requested)
+#   3) Otherwise, answer helpfully (no side effects)
+# Safety:
+#   - EKA_READ_ONLY="true" → disables create/delete
+#   - EKA_ADMIN_CODE="..."  → create/delete require this code
 
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
 import streamlit as st
 
-# -------- Optional deps --------
+# ---------- Optional deps ----------
 try:
     from markdownify import markdownify as md
 except Exception:
@@ -27,7 +26,7 @@ def _secret(k, default=None):
     try: return st.secrets[k]
     except Exception: return os.environ.get(k, default)
 
-# -------- Writable caches (Streamlit Cloud friendly) --------
+# ---------- Writable caches (Streamlit Cloud friendly) ----------
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
 if not WRITABLE_BASE.exists():
     WRITABLE_BASE = pathlib.Path(tempfile.gettempdir()) / "eka"
@@ -51,7 +50,7 @@ os.environ.update({
     "XDG_CACHE_HOME": str(WRITABLE_BASE),
 })
 
-# -------- OpenAI / LLM --------
+# ---------- OpenAI / LLM ----------
 def _find_secret_key() -> str:
     candidates = ["OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY", "openai_api_key", "openai_key"]
     try:
@@ -87,7 +86,7 @@ def _openai_diag() -> str:
     if use and not key: return "OpenAI: ON (key missing ⚠)"
     return "OpenAI: OFF"
 
-# -------- Settings --------
+# ---------- Settings ----------
 TOP_K = int(_secret("EKA_TOP_K", "12"))
 MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
 RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
@@ -96,21 +95,24 @@ DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "tru
 AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
 USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
 
-# -------- PY path --------
+# NEW: mutation guards
+READ_ONLY = _secret("EKA_READ_ONLY", "false").lower() == "true"
+ADMIN_CODE = _secret("EKA_ADMIN_CODE", "").strip()
+
+# ---------- PY path ----------
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# -------- Local imports --------
+# ---------- Local imports ----------
 from app.rag.utils import ensure_dirs, load_cfg
 from app.rag.embedder import Embedder
 from app.rag.index import DocIndex
 from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
-from app.llm.gpt_client import GPTClient
 
-# -------- Config & dirs --------
+# ---------- Config & dirs ----------
 CFG = load_cfg("configs/settings.yaml") if pathlib.Path("configs/settings.yaml").exists() else {}
 RET = CFG.get("retrieval", {})
 EMB_MODEL = RET.get("embedder_model", "sentence-transformers/all-MiniLM-L6-v2")
@@ -127,16 +129,13 @@ PROC_DIR = pathlib.Path("data/processed")
 WIKI_DIR = PROC_DIR / "wiki"
 INDEX_DIR = pathlib.Path("data/index")
 
-# Vector cache (per-source)
-VEC_DIR   = INDEX_DIR / "vecs"        # per-source vectors (*.npy)
-RECS_DIR  = INDEX_DIR / "records"     # per-source records (*.json)
-MANIFEST  = INDEX_DIR / "vecs_manifest.json"  # { source -> {vec: path, recs: path, n: chunks} }
+# Vector cache
+VEC_DIR   = INDEX_DIR / "vecs"
+RECS_DIR  = INDEX_DIR / "records"
+MANIFEST  = INDEX_DIR / "vecs_manifest.json"
+for p in (VEC_DIR, RECS_DIR, MANIFEST.parent): p.mkdir(parents=True, exist_ok=True)
 
-VEC_DIR.mkdir(parents=True, exist_ok=True)
-RECS_DIR.mkdir(parents=True, exist_ok=True)
-MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-
-# -------- CSS / UI --------
+# ---------- CSS / UI ----------
 st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="✨", layout="wide")
 st.markdown("""
 <style>
@@ -154,7 +153,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -------- Progress --------
+# ---------- Progress ----------
 class Prog:
     def __init__(self, initial_text: str = "Working…"):
         self._pb = st.progress(0, text=initial_text); self._last = 0.0
@@ -163,7 +162,7 @@ class Prog:
         value = max(0.0, min(float(value), 1.0)); self._last = value
         self._pb.progress(int(value * 100), text=label if label is not None else None)
 
-# -------- Seed corpus --------
+# ---------- Seed corpus ----------
 SEED_MD: Dict[str, str] = {
     "values.md": """# Values at Our Company
 
@@ -194,11 +193,7 @@ def write_seed_corpus() -> Dict:
     (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
     return {"ok": True, "written": len(SEED_MD) + 2}
 
-# -------- Helpers: files, chunks, manifest --------
-def _slug(url: str) -> str:
-    s = url.split("https://about.gitlab.com/handbook/")[-1].strip("/")
-    return (s or "index").replace("/", "-")
-
+# ---------- Helpers: files, chunks, manifest ----------
 def _scan_processed_files() -> List[pathlib.Path]: return sorted(PROC_DIR.glob("**/*.md"))
 def _split_md(text: str) -> List[Dict]: return list(split_markdown(text, **CHUNK_CFG))
 def have_any_markdown() -> bool: return any(PROC_DIR.rglob("*.md"))
@@ -217,7 +212,6 @@ def save_manifest(m: Dict[str, Dict]) -> None:
     MANIFEST.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
-    """Persist per-source vectors (.npy) and records (.json) so future deletes avoid re-embedding."""
     import numpy as np
     h = _hash_source(source)
     vpath = VEC_DIR / f"{h}.npy"
@@ -236,16 +230,13 @@ def remove_cache_for_sources(sources: List[str]) -> List[str]:
         if not info: continue
         for p in (info.get("vec"), info.get("recs")):
             if p:
-                try:
-                    pathlib.Path(p).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                try: pathlib.Path(p).unlink(missing_ok=True)
+                except Exception: pass
         removed.append(s)
     save_manifest(m)
     return removed
 
 def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
-    """Load all cached vectors & records (no embedding)."""
     import numpy as np
     m = load_manifest()
     if not m: return None, []
@@ -260,7 +251,7 @@ def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
     X = np.vstack(vecs) if len(vecs) > 1 else vecs[0]
     return X.astype("float32"), recs
 
-# -------- Models & Index --------
+# ---------- Models & Index ----------
 @st.cache_resource(show_spinner=False)
 def get_models():
     emb = Embedder(EMB_MODEL, NORMALIZE)
@@ -274,7 +265,6 @@ def get_models():
 def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
 
-# -------- Index builders --------
 def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx = load_or_init_index()
     if progress: progress.update(label="Writing index…", value=0.92)
@@ -286,17 +276,14 @@ def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
     if progress: progress.update(label="Loading cached vectors…", value=0.1)
     X, records = concat_cache()
     if X is None:
-        # No cache available; fall back to full rebuild (once).
         return rebuild_index(progress)
     if progress: progress.update(label=f"Assembling {len(records)} chunks…", value=0.35)
     save_index(X, records, progress)
     return {"num_files": len(set(r["source"] for r in records)), "num_chunks": len(records)}
 
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
-    """Embed everything once and persist per-source caches for future fast deletes."""
     files = _scan_processed_files()
     if progress: progress.update(label=f"Scanning… {len(files)} files", value=0.03)
-
     import numpy as np
     emb, _ = get_models()
     all_vecs, all_recs = [], []
@@ -309,12 +296,10 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
             V = emb.encode(texts)
             all_vecs.append(V)
             all_recs.extend(recs)
-            # persist per-source cache
             save_cache_for_source(str(fp).replace("\\","/"), V, recs)
         if progress:
             progress.update(label=f"Embedding {i}/{len(files)} files…",
                             value=0.05 + 0.80*(i/max(1,len(files))))
-
     X = np.vstack(all_vecs) if all_vecs else None
     if X is None:
         import numpy as np
@@ -329,10 +314,9 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     texts = [c["text"] for c in chunks]
     if not texts: return {"added_chunks": 0}
     emb, _ = get_models()
-    V = emb.encode(texts)                       # embed once
+    V = emb.encode(texts)
     recs = [{"text": t, "source": source_path} for t in texts]
-    save_cache_for_source(source_path, V, recs) # persist cache first
-    # Append to index if DocIndex supports it; else rebuild from cache (no re-embed)
+    save_cache_for_source(source_path, V, recs)
     idx = load_or_init_index()
     if hasattr(idx, "add"):
         if progress: progress.update(label="Appending to index…", value=0.7)
@@ -344,7 +328,7 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
         stats = rebuild_from_cache(progress)
         return {"added_chunks": len(texts), "appended": False, "rebuilt": stats}
 
-# -------- Retrieval & attribution --------
+# ---------- Retrieval & attribution ----------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     t0 = time.time()
     emb, rer = get_models()
@@ -416,16 +400,7 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
-# -------- GPT helper (for agent answers) --------
-_gpt_singleton = None
-def _get_gpt() -> Optional[GPTClient]:
-    global _gpt_singleton
-    if _gpt_singleton is None:
-        try: _gpt_singleton = GPTClient()
-        except Exception: _gpt_singleton = None
-    return _gpt_singleton
-
-# -------- Header --------
+# ---------- Header ----------
 def _index_health() -> Tuple[str, str]:
     try:
         idx = load_or_init_index()
@@ -445,7 +420,7 @@ _status_slot = st.empty()
 badge_html, _ = _index_health()
 _status_slot.markdown(f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>", unsafe_allow_html=True)
 
-# -------- Bootstrap (optional) --------
+# ---------- Bootstrap (optional) ----------
 CURATED = [
     "https://about.gitlab.com/handbook/",
     "https://about.gitlab.com/handbook/values/",
@@ -470,12 +445,12 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
             r.raise_for_status()
             html = r.text
-            (RAW_DIR / f"{_slug(url)}.html").write_text(html, encoding="utf-8")
-            (PROC_DIR / f"{_slug(url)}.md").write_text(md(html), encoding="utf-8")
+            (RAW_DIR / f"{url.split('/')[-2] or 'index'}.html").write_text(html, encoding="utf-8")
+            (PROC_DIR / f"{url.split('/')[-2] or 'index'}.md").write_text(md(html), encoding="utf-8")
             ok += 1; time.sleep(0.02)
         except Exception:
             pass
-    return {"ok": ok > 0, "downloaded": ok, "total": total}
+    return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
 
 def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
@@ -484,8 +459,8 @@ def corpus_stats() -> Dict:
     return {"files": n_files, "size_kb": int(n_bytes/1024)}
 
 def copy_prebuilt_if_available() -> bool:
-    pre_faiss = PREBUILT_DIR / pathlib.Path(INDEX_PATH).name
-    pre_store = PREBUILT_DIR / pathlib.Path(STORE_PATH).name
+    pre_faiss = pathlib.Path("data/index/prebuilt") / pathlib.Path(INDEX_PATH).name
+    pre_store = pathlib.Path("data/index/prebuilt") / pathlib.Path(STORE_PATH).name
     if pre_faiss.exists() and pre_store.exists():
         os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
         shutil.copy2(pre_faiss, INDEX_PATH)
@@ -494,26 +469,22 @@ def copy_prebuilt_if_available() -> bool:
     return False
 
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
-    # Prefer prebuilt (fast)
     if USE_PREBUILT and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
         return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
     if force_rebuild:
-        prog = Prog("Rebuilding index from cache if possible…")
+        prog = Prog("Rebuilding index from cache…")
         return {"seeded": False, "rebuilt": True, "stats": rebuild_from_cache(prog)}
     if not have_any_markdown():
-        # seed + build (once)
         write_seed_corpus()
         prog = Prog("Indexing seed corpus…")
         stats = rebuild_index(prog)
         return {"seeded": True, "rebuilt": True, "stats": stats}
-    # If index missing, try cache first
     if not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists():
         prog = Prog("Restoring index from cache…")
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
-# Prepare app quickly
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
         if AUTO_BOOTSTRAP and not have_any_markdown():
@@ -522,7 +493,7 @@ if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists())
             if not res.get("ok"): write_seed_corpus()
         ensure_ready_and_index(force_rebuild=False)
 
-# -------- Tabs --------
+# ---------- Tabs ----------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
 
 # ===== ASK =====
@@ -534,7 +505,6 @@ with tab_ask:
     mode = c1.selectbox("Retrieval mode", ["hybrid","dense","sparse"],
                         index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
-
     if st.button("Get answer", type="primary", key="ask_btn"):
         if not q.strip():
             st.warning("Please enter a question.")
@@ -582,20 +552,24 @@ if "agent_state" not in st.session_state:
         "last_display": ""
     }
 
+# Intent regexes — DELETE first to avoid false "create" matches in filenames
+DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
 CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
-DELETE_PAT = re.compile(r"\b(delete|remove|trash|erase|drop)\b\s+(.+)", re.I)
 
 def classify_intent(msg: str) -> Tuple[str, Dict]:
     text = (msg or "").strip()
-    if CREATE_PAT.search(text):
-        m = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
-        title = m.group(1) if m else re.sub(r".*\b(wiki|page|article|doc)\b( about| on|:)?\s*", "", text, flags=re.I)
-        title = (title or "").strip().rstrip(".")
-        return "create_wiki", {"title": title[:120] if title else "Untitled"}
+    # Prioritize DELETE
     mdm = DELETE_PAT.search(text)
     if mdm:
-        target = mdm.group(2).strip().strip('"\'').rstrip(".")
+        target = mdm.group("target").strip().strip('"\'').rstrip(".")
         return "delete_wiki", {"query": target[:200] if target else ""}
+    # Then CREATE (requires doc noun)
+    if CREATE_PAT.search(text):
+        m_title = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
+        title = m_title.group(1) if m_title else re.sub(r".*\b(wiki|page|article|doc)\b( about| on|:)?\s*", "", text, flags=re.I)
+        title = (title or "").strip().rstrip(".")
+        return "create_wiki", {"title": title[:120] if title else "Untitled"}
+    # Otherwise answer
     return "answer", {}
 
 def concise_title(title: str) -> str:
@@ -603,13 +577,11 @@ def concise_title(title: str) -> str:
     t = re.sub(r"\?$", "", t)
     t = re.sub(r"^(create|write|make|draft|add)\s+", "", t, flags=re.I)
     if len(t) > 60: t = t[:57].rstrip() + "…"
-    def _tc(s):
-        return " ".join(
-            w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"}
-            else w.lower()
-            for w in re.split(r"(\s+|\—)", s)
-        )
-    t = _tc(t); t = re.sub(r"\s*—\s*", " — ", t)
+    # Title case w/ small words
+    def _tc_word(w):
+        return w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
+    t = " ".join(_tc_word(w) for w in re.split(r"(\s+|\—)", t))
+    t = re.sub(r"\s*—\s*", " — ", t)
     return t
 
 def render_wiki_md(title: str, key_points: List[str]) -> str:
@@ -678,7 +650,6 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
 
 def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
-    # Physically delete files
     deleted_paths = []
     for f in selected_files:
         p = pathlib.Path(f)
@@ -688,34 +659,34 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
                 deleted_paths.append(str(p).replace("\\","/"))
         except Exception:
             pass
-    # Remove cached vectors & records for those sources
     _ = remove_cache_for_sources(deleted_paths)
-    # Rebuild FAISS from cache only (no re-embedding)
     prog = Prog("Refreshing index from cache…")
-    stats = rebuild_from_cache(prog)
+    _ = rebuild_from_cache(prog)
     return {"deleted": deleted_paths, "num_deleted": len(deleted_paths)}
 
+# ===== Agent tab =====
 with tab_agent:
     st.markdown("**Agent**")
-    st.write("The agent has three behaviors:\n"
-             "1) If your request clearly asks to **create a wiki page**, it will propose a title & content and ask for confirmation.\n"
-             "2) If your request asks to **delete a page**, it will list matching files and ask for confirmation.\n"
-             "3) Otherwise, it will **answer helpfully** without side effects.\n"
-             "Nothing happens without your approval.")
+    st.write("The agent can: (1) propose & create wiki pages, (2) delete pages, or (3) answer normally. "
+             "Create/delete always require your confirmation.")
+    if READ_ONLY:
+        st.info("Read-only mode is ON. Creating or deleting pages is disabled.", icon="ℹ️")
 
-    # RESULT AREA stays below inputs, so the Run/Confirm buttons never move
+    # Result area lives here (buttons remain near inputs)
     agent_result = st.container()
-
-    # Always keep a small state dict
     state = st.session_state["agent_state"]
 
-    # -------- MAIN AGENT FORM (prevents double-click and keeps button under input) --------
+    # Main agent form
     with st.form("agent_main_form", clear_on_submit=False):
         msg = st.text_area(
             "Goal or task",
             height=110,
             placeholder='e.g., create a wiki page "Values in Performance Reviews" · delete values.md · or just ask a question',
             key="agent_msg",
+        )
+        admin_code_input = st.text_input(
+            "Admin code (required for create/delete)", type="password",
+            value="", help="Set EKA_ADMIN_CODE to require this; leave empty if not configured."
         )
         submitted_run = st.form_submit_button("Run", type="primary")
 
@@ -725,46 +696,68 @@ with tab_agent:
             with agent_result: st.warning("Please describe what you want the agent to do.")
         else:
             intent, info = classify_intent(text)
+
+            # Guard mutations
+            def _mutations_allowed() -> Tuple[bool, str]:
+                if READ_ONLY:
+                    return False, "Read-only mode: create/delete are disabled."
+                if ADMIN_CODE:
+                    if not admin_code_input or admin_code_input != ADMIN_CODE:
+                        return False, "Invalid or missing admin code."
+                return True, ""
+
             if intent == "create_wiki":
-                # prepare proposal
-                query = text if text.endswith("?") else (text.rstrip(".") + "?")
-                recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
-                emb, _ = get_models()
-                points = extract_key_points(query, pairs, emb, max_points=5)
-                title = concise_title(info.get("title") or "Untitled")
-                content = render_wiki_md(title, points)
-                state["mode"] = "create_proposed"
-                state["proposed_title"] = title
-                state["proposed_content"] = content
-                state["delete_candidates"] = []
-                state["last_message"] = text
+                ok, why = _mutations_allowed()
+                if not ok:
+                    with agent_result: st.error(why)
+                else:
+                    # Build proposal
+                    query = text if text.endswith("?") else (text.rstrip(".") + "?")
+                    recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+                    emb, _ = get_models()
+                    points = extract_key_points(query, pairs, emb, max_points=5)
+                    title = concise_title(info.get("title") or "Untitled")
+                    content = render_wiki_md(title, points)
+                    state.update({
+                        "mode": "create_proposed",
+                        "proposed_title": title,
+                        "proposed_content": content,
+                        "delete_candidates": [],
+                        "last_message": text
+                    })
 
             elif intent == "delete_wiki":
-                q = (info.get("query") or "").lower()
-                cands = []
-                for p in WIKI_DIR.glob("*.md"):
-                    if q in p.stem.lower() or q in p.name.lower():
-                        cands.append(str(p).replace("\\","/"))
-                state["mode"] = "delete_proposed"
-                state["delete_candidates"] = cands
-                state["proposed_title"] = ""
-                state["proposed_content"] = ""
-                state["last_message"] = text
+                ok, why = _mutations_allowed()
+                if not ok:
+                    with agent_result: st.error(why)
+                else:
+                    q = (info.get("query") or "").lower()
+                    cands = []
+                    for p in WIKI_DIR.glob("*.md"):
+                        if q in p.stem.lower() or q in p.name.lower():
+                            cands.append(str(p).replace("\\","/"))
+                    state.update({
+                        "mode": "delete_proposed",
+                        "delete_candidates": cands,
+                        "proposed_title": "",
+                        "proposed_content": "",
+                        "last_message": text
+                    })
+                    if not cands:
+                        with agent_result: st.info("No matching wiki files found.")
 
             else:
-                # Helpful answer (no side effects)
+                # Helpful answer
                 ensure_ready_and_index(False)
                 recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
                 if len(pairs) == 0:
                     ensure_ready_and_index(True)
                     recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
-                # Prefer GPT if available through generate_answer
                 ans, llm_meta = generate_answer(recs, text, max_chars=900)
                 if not ans or ans.strip() in {".", ""}:
                     joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
                     ans = joined[:900] if joined else "No relevant context found in the current corpus."
-                state["mode"] = "idle"
-                state["last_display"] = ans
+                state.update({"mode": "idle", "last_display": ans})
                 with agent_result:
                     st.subheader("Agent answer")
                     st.write(ans)
@@ -773,7 +766,7 @@ with tab_agent:
                         with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
                             st.write(c["preview"])
 
-    # -------- CREATE CONFIRM FORM --------
+    # CREATE confirm
     if state["mode"] == "create_proposed":
         st.subheader("Create wiki — confirmation required")
         with st.form("agent_create_confirm", clear_on_submit=False):
@@ -783,29 +776,28 @@ with tab_agent:
             confirm_create = c1.form_submit_button("Confirm create page")
             cancel_create  = c2.form_submit_button("Cancel")
         if confirm_create:
-            res = agent_apply_create_wiki(title_val.strip() or state["proposed_title"], state["proposed_content"])
-            state["mode"] = "idle"
-            state["proposed_title"] = ""
-            state["proposed_content"] = ""
-            state["last_display"] = f"Created **{res['file']}** (added {res['added_chunks']} chunks)."
-            with agent_result:
+            if READ_ONLY or (ADMIN_CODE and not admin_code_input == ADMIN_CODE):
+                st.error("Create denied: read-only or invalid admin code.")
+            else:
+                res = agent_apply_create_wiki(title_val.strip() or state["proposed_title"], state["proposed_content"])
                 st.success(f"Created and indexed: **{res['file']}**")
                 st.caption(res.get("path", ""))
+                st.session_state["agent_state"] = {
+                    "mode": "idle", "proposed_title":"", "proposed_content":"",
+                    "delete_candidates":[], "last_message":"", "last_display": f"Created {res['file']}"
+                }
         elif cancel_create:
-            state["mode"] = "idle"
-            state["proposed_title"] = ""
-            state["proposed_content"] = ""
-            with agent_result: st.info("Create action canceled.")
+            st.session_state["agent_state"]["mode"] = "idle"
+            st.info("Create action canceled.")
 
-    # -------- DELETE CONFIRM FORM --------
+    # DELETE confirm
     if state["mode"] == "delete_proposed":
         st.subheader("Delete wiki — confirmation required")
         if not state["delete_candidates"]:
-            with agent_result: st.info("No matching wiki files found.")
             with st.form("agent_delete_close"):
                 close_btn = st.form_submit_button("Close")
             if close_btn:
-                state["mode"] = "idle"
+                st.session_state["agent_state"]["mode"] = "idle"
         else:
             with st.form("agent_delete_confirm", clear_on_submit=False):
                 sel = st.multiselect(
@@ -817,18 +809,20 @@ with tab_agent:
                 confirm_delete = d1.form_submit_button("Confirm delete selected")
                 cancel_delete  = d2.form_submit_button("Cancel")
             if confirm_delete:
-                res = agent_apply_delete_wiki(sel)
-                state["mode"] = "idle"
-                state["delete_candidates"] = []
-                state["last_display"] = f"Deleted {res['num_deleted']} file(s)."
-                with agent_result:
+                if READ_ONLY or (ADMIN_CODE and not admin_code_input == ADMIN_CODE):
+                    st.error("Delete denied: read-only or invalid admin code.")
+                else:
+                    res = agent_apply_delete_wiki(sel)
                     st.success(f"Deleted **{res['num_deleted']}** file(s).")
                     if res.get("deleted"):
                         st.code("\n".join(res["deleted"]), language="text")
+                    st.session_state["agent_state"] = {
+                        "mode":"idle","proposed_title":"", "proposed_content":"",
+                        "delete_candidates":[], "last_message":"", "last_display": f"Deleted {res['num_deleted']} file(s)"
+                    }
             elif cancel_delete:
-                state["mode"] = "idle"
-                state["delete_candidates"] = []
-                with agent_result: st.info("Delete action canceled.")
+                st.session_state["agent_state"]["mode"] = "idle"
+                st.info("Delete action canceled.")
 
 # ===== UPLOAD =====
 with tab_upload:
@@ -855,15 +849,12 @@ with tab_upload:
 
 # ===== ABOUT =====
 def _list_md_files() -> List[Dict]:
-    """Return list of all .md files under data/processed (incl. wiki), with size and short preview."""
     files = sorted(PROC_DIR.rglob("*.md"))
     out = []
     for f in files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            text = ""
-        preview = (text.strip().splitlines() + [""])[:6]  # first ~6 lines
+        try: text = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception: text = ""
+        preview = (text.strip().splitlines() + [""])[:6]
         out.append({
             "path": str(f).replace("\\","/"),
             "name": f.name,
@@ -875,11 +866,11 @@ def _list_md_files() -> List[Dict]:
 with tab_about:
     st.markdown("### How this works")
     st.markdown("""
-- **Hybrid retrieval**: semantic retrieval, optional reranker.
-- **Q&A**: answers strictly from retrieved passages; cites sources.
-- **Context Visualizer**: each sentence maps to the strongest supporting passage.
-- **Vector cache**: every page's vectors & records are saved. **Deletes never re-embed**—we rebuild FAISS from cached vectors only.
-- **Prebuilt index**: drop files into `data/index/prebuilt/` to skip any first-run build.
+- **Hybrid retrieval** with optional reranker.
+- **Q&A** answers strictly from retrieved passages with citations.
+- **Vector cache**: deletes never re-embed; we rebuild FAISS from cached vectors only.
+- **Prebuilt index**: drop files into `data/index/prebuilt/` to skip first-run builds.
+- **Safety**: set `EKA_READ_ONLY="true"` for demos, or set `EKA_ADMIN_CODE` to require a passcode for create/delete.
 """)
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

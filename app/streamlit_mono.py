@@ -1,14 +1,15 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (Streamlit Cloud friendly)
 # Agent behaviors:
-#   (1) Explicit "create wiki/page/article" → propose title/content → ask to Confirm → create + index
-#   (2) Explicit "delete ..."               → show matching files → ask to Confirm → delete + index
+#   (1) Explicit "create wiki/page/article" → propose title/content → Confirm → create + index (with clear confirmation)
+#   (2) Explicit "delete ..."               → list matches → Confirm → delete + index (with clear confirmation)
 #   (3) Otherwise                           → answer helpfully (no side effects)
 #
 # - Never acts without confirmation
-# - No tab jumping (no query param updates)
+# - No tab jumping (no query param updates/reruns to other tabs)
 # - Uses prebuilt index if present; repairs index if empty
 # - Incremental add is attempted; falls back to rebuild if unsupported
+# - Agent confirmations persist across reruns via st.session_state
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -88,7 +89,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# Default to gpt-4o (can be overridden)
+# default model (override via secrets)
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -169,19 +170,6 @@ class Prog:
         if value is None: value = self._last
         value = max(0.0, min(float(value), 1.0)); self._last = value
         self._pb.progress(int(value * 100), text=label if label is not None else None)
-
-# ---------- Flash helper (persist confirmations across reruns) ----------
-def flash(kind: str, msg: str):
-    st.session_state.setdefault("agent_flash", []).append((kind, msg))
-
-def show_and_clear_flashes():
-    if "agent_flash" in st.session_state and st.session_state["agent_flash"]:
-        for kind, msg in st.session_state["agent_flash"]:
-            if kind == "success": st.success(msg)
-            elif kind == "warning": st.warning(msg)
-            elif kind == "error": st.error(msg)
-            else: st.info(msg)
-        st.session_state["agent_flash"] = []
 
 # ---------- Seed corpus ----------
 SEED_MD: Dict[str, str] = {
@@ -308,7 +296,7 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     records = [{"text": t, "source": source_path} for t in texts]
     idx = load_or_init_index()
     if progress: progress.update(label="Appending to index…", value=0.6)
-    if hasattr(idx, "add"): idx.add(vecs, records)  # may not exist in your DocIndex → fallback
+    if hasattr(idx, "add"): idx.add(vecs, records)  # optional; else fallback:
     else: return rebuild_index(progress)
     if progress: progress.update(label="Saved.", value=1.0)
     return {"added_chunks": len(texts)}
@@ -393,18 +381,6 @@ def _get_gpt() -> Optional[GPTClient]:
         try: _gpt_singleton = GPTClient()
         except Exception: _gpt_singleton = None
     return _gpt_singleton
-
-def gpt_compose(context: str, prompt: str, max_chars: int) -> Optional[str]:
-    gpt = _get_gpt()
-    if not gpt or os.environ.get("USE_OPENAI","false").lower()!="true":
-        return None
-    try:
-        text, _meta = gpt.answer(context, prompt)
-        text = (text or "").strip()
-        if text: return text[:max_chars].rstrip()
-    except Exception:
-        return None
-    return None
 
 # ---------- Header + status ----------
 def _index_health() -> Tuple[str, str]:
@@ -549,8 +525,16 @@ with tab_ask:
                     st.write(c['preview'])
 
 # ===== AGENT =====
+# --- Agent state machine in session ---
+if "agent_state" not in st.session_state:
+    st.session_state["agent_state"] = {
+        "mode": "idle",            # idle | create_proposed | delete_proposed
+        "proposed_title": "",
+        "proposed_content": "",
+        "delete_candidates": [],
+        "last_result": None        # dict with confirmation results to show persistently
+    }
 
-# ---- Intent classification for 3 behaviors ----
 CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
 DELETE_PAT = re.compile(r"\b(delete|remove|trash|erase|drop)\b\s+(.+)", re.I)
 
@@ -558,10 +542,10 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     """Return ('create_wiki'|'delete_wiki'|'answer', info)"""
     text = (msg or "").strip()
     if CREATE_PAT.search(text):
-        # extract a title candidate (quoted or after 'about/on: ')
+        # try quoted title, else strip command prefix
         m = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
         title = m.group(1) if m else re.sub(r".*\b(wiki|page|article|doc)\b( about| on|:)?\s*", "", text, flags=re.I)
-        title = title.strip().rstrip(".")
+        title = (title or "").strip().rstrip(".")
         return "create_wiki", {"title": title[:120] if title else "Untitled"}
     md = DELETE_PAT.search(text)
     if md:
@@ -575,8 +559,11 @@ def concise_title(title: str) -> str:
     t = re.sub(r"^(create|write|make|draft|add)\s+", "", t, flags=re.I)
     if len(t) > 60: t = t[:57].rstrip() + "…"
     def _tc(s):
-        return " ".join(w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
-                        for w in re.split(r"(\s+|\—)", s))
+        return " ".join(
+            w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"}
+            else w.lower()
+            for w in re.split(r"(\s+|\—)", s)
+        )
     t = _tc(t)
     t = re.sub(r"\s*—\s*", " — ", t)
     return t
@@ -608,16 +595,20 @@ def render_wiki_md(title: str, key_points: List[str]) -> str:
 (Agent synthesized from indexed documents.)
 """
 
-def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5) -> List[str]:
+def _split_sentences_for_points(txt: str) -> List[str]:
+    out = []
+    for s in _split_sentences(txt or ""):
+        s2 = s.strip()
+        if 50 <= len(s2) <= 240 and re.match(r"^[A-Z0-9].*[\.!\?]$", s2) and "http" not in s2:
+            out.append(s2)
+    return out
+
+def extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5) -> List[str]:
     if not pairs: return []
     qv = emb.encode([query])
     cands = []
     for rec, _ in pairs[:24]:
-        txt = (rec.get("text") or "")
-        for s in _split_sentences(txt):
-            s2 = s.strip()
-            if 50 <= len(s2) <= 240 and re.match(r"^[A-Z0-9].*[\.!\?]$", s2) and "http" not in s2:
-                cands.append(s2)
+        cands.extend(_split_sentences_for_points(rec.get("text") or ""))
     if not cands: return []
     sv = emb.encode(cands)
     import numpy as np
@@ -652,86 +643,154 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
         try:
             if p.exists():
                 p.unlink()
-                deleted.append(str(p))
+                deleted.append(str(p).replace("\\","/"))
         except Exception:
             pass
     prog = Prog("Rebuilding index after deletion…")
     stats = rebuild_index(prog)
     return {"deleted": deleted, "reindexed": stats}
 
+# ----- Agent UI -----
 with tab_agent:
     st.markdown("**Agent**")
-    st.write("Type what you need. The agent will either (1) propose a new wiki page and ask to confirm, "
-             "(2) propose deletion candidates and ask to confirm, or (3) just answer helpfully. "
-             "No actions happen without your approval.")
-    show_and_clear_flashes()
+    st.write("The agent has three behaviors:\n"
+             "1) If your request clearly asks to **create a wiki page**, it will propose a title & content and ask for confirmation.\n"
+             "2) If your request asks to **delete a page**, it will list matching files and ask for confirmation.\n"
+             "3) Otherwise, it will **answer helpfully** without side effects.\n"
+             "Nothing happens without your approval.")
 
-    msg = st.text_area("Goal or task", height=110,
-                       placeholder="Examples: \"create a wiki page about values in performance reviews\" · \"delete values.md\" · or just ask a question")
+    state = st.session_state["agent_state"]
 
-    # --- Run agent ---
-    if st.button("Run", type="primary", key="agent_run_btn"):
-        if not msg.strip():
-            st.warning("Please describe what you want the agent to do.")
+    # Show persistent result of last action, if any
+    if state["last_result"]:
+        r = state["last_result"]
+        if r.get("action") == "create":
+            st.success(f"Created and indexed: **{r['title']}**  → `{r['file']}`")
+            st.caption(r.get("path", ""))
+            with st.expander("Index details"):
+                st.json(r.get("details", {}))
+        elif r.get("action") == "delete":
+            st.success(f"Deleted **{len(r.get('deleted', []))}** file(s) and rebuilt index.")
+            if r.get("deleted"):
+                st.code("\n".join(r["deleted"]), language="text")
+            with st.expander("Index details"):
+                st.json(r.get("details", {}))
+
+    # If we are in a proposed action flow, render the confirmation UI
+    if state["mode"] == "create_proposed":
+        st.subheader("Create wiki — confirmation required")
+        title_val = st.text_input("Title", value=state["proposed_title"], key="agent_create_title")
+        st.code(state["proposed_content"], language="markdown")
+        colc1, colc2 = st.columns(2)
+        if colc1.button("Confirm create page", key="agent_confirm_create"):
+            res = agent_apply_create_wiki(title_val.strip() or state["proposed_title"], state["proposed_content"])
+            # inline confirmation + persist result
+            st.success(f"Created and indexed: **{title_val.strip() or state['proposed_title']}**  → `{res['file']}`")
+            st.caption(res.get("path", ""))
+            with st.expander("Index details"):
+                st.json(res)
+            st.session_state["agent_state"] = {
+                "mode": "idle",
+                "proposed_title": "",
+                "proposed_content": "",
+                "delete_candidates": [],
+                "last_result": {
+                    "action": "create",
+                    "title": title_val.strip() or state["proposed_title"],
+                    "file": res.get("file", ""),
+                    "path": res.get("path", ""),
+                    "details": res
+                }
+            }
+        if colc2.button("Cancel", key="agent_cancel_create"):
+            st.session_state["agent_state"]["mode"] = "idle"
+
+    elif state["mode"] == "delete_proposed":
+        st.subheader("Delete wiki — confirmation required")
+        if not state["delete_candidates"]:
+            st.info("No matching wiki files found. Tip: use a distinctive part of the filename or title.")
+            if st.button("Close", key="agent_close_delete_empty"):
+                st.session_state["agent_state"]["mode"] = "idle"
         else:
-            intent, info = classify_intent(msg)
+            sel = st.multiselect("Select files to delete", options=state["delete_candidates"],
+                                 default=state["delete_candidates"][:1], key="agent_delete_sel")
+            cold1, cold2 = st.columns(2)
+            if cold1.button("Confirm delete selected", key="agent_confirm_delete"):
+                res = agent_apply_delete_wiki(sel)
+                st.success(f"Deleted **{len(res.get('deleted', []))}** file(s) and rebuilt index.")
+                if res.get("deleted"):
+                    st.code("\n".join(res["deleted"]), language="text")
+                with st.expander("Index details"):
+                    st.json(res)
+                st.session_state["agent_state"] = {
+                    "mode": "idle",
+                    "proposed_title": "",
+                    "proposed_content": "",
+                    "delete_candidates": [],
+                    "last_result": {
+                        "action": "delete",
+                        "deleted": res.get("deleted", []),
+                        "details": res
+                    }
+                }
+            if cold2.button("Cancel", key="agent_cancel_delete"):
+                st.session_state["agent_state"]["mode"] = "idle"
 
-            if intent == "create_wiki":
-                # Retrieve some context and propose content
-                query = msg if msg.endswith("?") else (msg.rstrip(".") + "?")
-                recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
-                emb, _ = get_models()
-                points = _extract_key_points(query, pairs, emb, max_points=5)
-                title = concise_title(info.get("title") or "Untitled")
-                content = render_wiki_md(title, points)
-
-                st.subheader("Create wiki — confirmation required")
-                title_val = st.text_input("Title", value=title, key="agent_create_title")
-                st.code(content, language="markdown")
-                st.caption("This will create a new Markdown file under data/processed/wiki/ and update the index.")
-                if st.button("Confirm create page", key="agent_confirm_create"):
-                    res = agent_apply_create_wiki(title_val.strip() or title, content)
-                    flash("success", f"Created and indexed: **{title_val.strip() or title}**  → `{res['file']}`")
-                    with st.expander("Details", expanded=False):
-                        st.json(res)
-
-            elif intent == "delete_wiki":
-                st.subheader("Delete wiki — confirmation required")
-                q = (info.get("query") or "").lower()
-                # Find candidate files
-                candidates = []
-                for p in WIKI_DIR.glob("*.md"):
-                    if q in p.stem.lower() or q in p.name.lower():
-                        candidates.append(str(p))
-                if not candidates:
-                    st.info("No matching wiki files found. Tip: use a distinctive part of the filename or title.")
-                else:
-                    sel = st.multiselect("Select files to delete", options=candidates, default=candidates[:1])
-                    st.caption("Selected files will be permanently removed from disk. The index will then be rebuilt.")
-                    if st.button("Confirm delete selected", key="agent_confirm_delete"):
-                        res = agent_apply_delete_wiki(sel)
-                        flash("success", f"Deleted **{len(res['deleted'])}** file(s) and rebuilt index.")
-                        with st.expander("Details", expanded=False):
-                            st.json(res)
-
+    else:
+        # Idle → normal agent run path
+        msg = st.text_area("Goal or task", height=110,
+                           placeholder="e.g., create a wiki page about values in performance reviews · delete values.md · or just ask a question",
+                           key="agent_msg")
+        if st.button("Run", type="primary", key="agent_run_btn"):
+            text = (msg or "").strip()
+            if not text:
+                st.warning("Please describe what you want the agent to do.")
             else:
-                # Helpful text answer (no side effects)
-                q = msg.strip()
-                ensure_ready_and_index(False)
-                recs, pairs, meta = retrieve(q, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
-                if len(pairs) == 0:
-                    ensure_ready_and_index(True)
-                    recs, pairs, meta = retrieve(q, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
-                ans, llm_meta = generate_answer(recs, q, max_chars=900)
-                if not ans or ans.strip() in {".", ""}:
-                    joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
-                    ans = joined[:900] if joined else "No relevant context found in the current corpus."
-                st.subheader("Agent answer")
-                st.write(ans)
-                st.markdown("#### Sources")
-                for c in fmt_citations(pairs, k=min(6, len(pairs))):
-                    with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
-                        st.write(c["preview"])
+                intent, info = classify_intent(text)
+                if intent == "create_wiki":
+                    # propose title & content from current context
+                    query = text if text.endswith("?") else (text.rstrip(".") + "?")
+                    recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+                    emb, _ = get_models()
+                    points = extract_key_points(query, pairs, emb, max_points=5)
+                    title = concise_title(info.get("title") or "Untitled")
+                    content = render_wiki_md(title, points)
+                    st.session_state["agent_state"].update({
+                        "mode": "create_proposed",
+                        "proposed_title": title,
+                        "proposed_content": content,
+                        "last_result": None
+                    })
+
+                elif intent == "delete_wiki":
+                    q = (info.get("query") or "").lower()
+                    cands = []
+                    for p in WIKI_DIR.glob("*.md"):
+                        if q in p.stem.lower() or q in p.name.lower():
+                            cands.append(str(p).replace("\\","/"))
+                    st.session_state["agent_state"].update({
+                        "mode": "delete_proposed",
+                        "delete_candidates": cands,
+                        "last_result": None
+                    })
+
+                else:
+                    # helpful answer (no side effects)
+                    ensure_ready_and_index(False)
+                    recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                    if len(pairs) == 0:
+                        ensure_ready_and_index(True)
+                        recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                    ans, llm_meta = generate_answer(recs, text, max_chars=900)
+                    if not ans or ans.strip() in {".", ""}:
+                        joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
+                        ans = joined[:900] if joined else "No relevant context found in the current corpus."
+                    st.subheader("Agent answer")
+                    st.write(ans)
+                    st.markdown("#### Sources")
+                    for c in fmt_citations(pairs, k=min(6, len(pairs))):
+                        with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
+                            st.write(c["preview"])
 
 # ===== UPLOAD =====
 with tab_upload:

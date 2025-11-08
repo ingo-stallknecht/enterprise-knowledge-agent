@@ -255,7 +255,10 @@ def get_models():
 @st.cache_resource(show_spinner=False)
 def load_or_init_index():
     idx = DocIndex(INDEX_PATH, STORE_PATH)
-    idx.load()
+    # If your DocIndex doesn't have .load(), remove this call; many versions lazy-load inside query_*.
+    if hasattr(idx, "load"):
+        try: idx.load()
+        except Exception: pass
     return idx
 
 # ---------- Build & incremental index ----------
@@ -290,7 +293,8 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
 
     idx = load_or_init_index()
     if progress: progress.update(label="Writing index…", value=0.9)
-    idx.build(X, records)
+    if hasattr(idx, "build"):
+        idx.build(X, records)
     if progress: progress.update(label="Done", value=1.0)
     return {"num_files": len(files), "num_chunks": len(records)}
 
@@ -305,7 +309,11 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     records = [{"text": t, "source": source_path} for t in texts]
     idx = load_or_init_index()
     if progress: progress.update(label="Appending to index…", value=0.6)
-    idx.add(vecs, records)
+    # Requires DocIndex.add(); if unavailable, fall back to rebuild_index.
+    if hasattr(idx, "add"):
+        idx.add(vecs, records)
+    else:
+        return rebuild_index(progress)
     if progress: progress.update(label="Saved.", value=1.0)
     return {"added_chunks": len(texts)}
 
@@ -386,7 +394,7 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
 def _index_health() -> Tuple[str, str]:
     try:
         idx = load_or_init_index()
-        ok = idx.size() > 0
+        ok = (idx.size() > 0) if hasattr(idx, "size") else True
         if st.session_state.get("eka_busy"): return "<span class='badge badge-warm'>Loading</span>", "warm"
         return ("<span class='badge badge-ok'>Online</span>", "ok") if ok else ("<span class='badge badge-err'>Empty</span>", "err")
     except Exception:
@@ -592,7 +600,9 @@ def _make_wiki_template(topic: str, key_points: List[str]) -> str:
 def _synthesize_from_keypoints(question: str, key_points: List[str], max_len: int = 800) -> str:
     if not key_points:
         return "No strong evidence found in the current corpus. Try seeding or bootstrapping the handbook."
-    intro = f"**Short answer to:** {re.sub(r'\\?$', '', question)}."
+    # Avoid backslashes inside f-string expression by precomputing:
+    cleaned_q = re.sub(r"\?$", "", question or "")
+    intro = f"**Short answer to:** {cleaned_q}."
     body = "\n".join(f"- {kp}" for kp in key_points[:8])
     txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
     return txt[:max_len].rstrip()

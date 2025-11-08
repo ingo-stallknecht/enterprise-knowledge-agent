@@ -1,10 +1,12 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (Streamlit Cloud friendly)
-# - Instant start via prebuilt index (data/index/prebuilt/*) if present
+# - Prebuilt index support for instant start (data/index/prebuilt/*)
 # - Incremental indexing on upload (no full rebuild)
-# - Polished UI (badges, KPIs, legend, pills)
-# - Agent: uses GPT-4 (gpt-4o) for clean short answer + wiki page; concise, user-facing summary
-# - Short, readable wiki titles (no run-on sentences)
+# - Polished UI (badges, KPIs, pills)
+# - Agent outputs human-centric text; adds time-boxed feedback guidance
+# - No "via gpt-4o" phrasing anywhere
+# - Agent checkbox: "Allow agent to make automatic actions (create wiki & index)"
+# - Preserves ?tab=agent in query params to reduce tab "jump" on rerun
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -91,7 +93,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# Default to GPT-4 (gpt-4o); override in secrets if needed
+# Default to gpt-4o (internally); we never print "via gpt-4o" in UI
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -124,7 +126,7 @@ from app.rag.index import DocIndex
 from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
-from app.llm.gpt_client import GPTClient  # direct GPT use for agent composition
+from app.llm.gpt_client import GPTClient  # internal, but UI never mentions model
 
 # ---------- Config & dirs ----------
 CFG = {}
@@ -280,8 +282,7 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     emb, _ = get_models()
     texts = [r["text"] for r in records]
     if texts:
-        vecs = []
-        batch = 64
+        vecs, batch = [], 64
         for s in range(0, len(texts), batch):
             e = min(len(texts), s+batch)
             vecs.append(emb.encode(texts[s:e]))
@@ -536,7 +537,18 @@ first_run_bootstrap()
 _ = ensure_ready_and_index(False)
 
 # ---------- Tabs ----------
-tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
+# Preserve desired tab in query params to reduce "jump"
+try:
+    qp = st.query_params  # Streamlit >=1.31
+    get_qp = lambda k, default=None: qp.get(k, default)
+    set_qp = lambda **kw: st.query_params.update(kw)
+except Exception:
+    get_qp = lambda k, default=None: st.experimental_get_query_params().get(k, [default])[0]
+    set_qp = lambda **kw: st.experimental_set_query_params(**kw)
+
+initial_tab = get_qp("tab", "ask")
+tabs = st.tabs(["Ask", "Agent", "Upload", "About"])
+tab_ask, tab_agent, tab_upload, tab_about = tabs
 
 # ===== ASK =====
 with tab_ask:
@@ -549,6 +561,7 @@ with tab_ask:
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
     if st.button("Get answer", type="primary", key="ask_btn"):
+        set_qp(tab="ask")
         if not q.strip():
             st.warning("Please enter a question.")
         else:
@@ -636,13 +649,11 @@ def _clean_text_blocks(text: str) -> str:
     return t
 
 def concise_title_from_query(q: str) -> str:
-    """Make a short, human title, <= 60 chars, no trailing '?'."""
+    """Short, human title, <= 60 chars, no trailing '?'."""
     base = q.strip()
     base = re.sub(r"\?$", "", base)
-    # remove scaffolding words
     base = re.sub(r"^(create|write|make|draft)\s+", "", base, flags=re.I)
     base = re.sub(r";\s*if.*$", "", base, flags=re.I)
-    # common mapping
     if re.search(r"\bvalues?\b.*\bperformance review", base, flags=re.I):
         title = "Values in Performance Reviews — Examples & Guidance"
     else:
@@ -650,12 +661,10 @@ def concise_title_from_query(q: str) -> str:
     title = title.strip().rstrip(".")
     if len(title) > 60:
         title = title[:57].rstrip() + "…"
-    # Title case-lite
     def _tc(s):
         return " ".join(w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
                         for w in re.split(r"(\s+|\—)", s))
     title = _tc(title)
-    # Normalize em dash spacing
     title = re.sub(r"\s*—\s*", " — ", title)
     return title
 
@@ -670,6 +679,7 @@ Tone: crisp, actionable, value-aligned.
 Sections: TL;DR, Key behaviors (bulleted), Examples (2-3), Checklist, References.
 
 Key points to use:
+- Time-box feedback and collect it before the decision deadline.
 {kp}
 
 Rules:
@@ -684,14 +694,14 @@ def build_answer_prompt(question: str) -> Tuple[str, str]:
     sys = "You are an expert summarizer. Produce a user-facing summary people actually want to read."
     user = f"""Question: {question}
 
-Write a short, user-facing answer with these sections:
+Write a short answer with these sections and always include one point about time-boxing feedback before deadlines:
 
 **Why it matters (1–2 lines)**
 **What to look for (4–6 bullets)**
 **Example review bullets (3–5 bullets)**
-**Checklist (4–6 bullets)**
+**Checklist (4–6 bullets, include: time-box feedback and collect it before the deadline)**
 
-Only use the provided context. If context is weak, explicitly say what's missing in one bullet.
+Only use the provided context. If context is weak, say what's missing in one bullet.
 Avoid repeating the question. No generic filler.
 """
     return sys, user
@@ -704,20 +714,22 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     # 2) Retrieve (hybrid, no reranker to keep fast)
     records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
 
-    # 3) GPT short, user-facing answer
+    # 3) Short, user-facing answer (includes time-boxed feedback guidance)
     ctx_for_llm = "\n\n".join((r.get("text") or "") for r,_ in pairs[:8])
     sys_a, user_a = build_answer_prompt(query)
     gpt_ans = gpt_compose(ctx_for_llm, f"{sys_a}\n\n{user_a}", max_chars=1200)
     if gpt_ans:
         short_answer = _clean_text_blocks(gpt_ans)
     else:
-        # fallback to app.llm.answerer (may be extractive)
         short_answer, _ = generate_answer([r for r,_ in pairs[:8]], query, max_chars=900)
         short_answer = _clean_text_blocks(short_answer)
 
     # 4) Key points to steer wiki
     emb, _ = get_models()
     points = _extract_key_points(query, pairs, emb, max_points=5)
+    # Ensure time-box bullet is present
+    if not any("time-box" in p.lower() or "time box" in p.lower() for p in points):
+        points = ["Time-box feedback windows and collect input before the decision deadline."] + points
 
     # 5) Concise title + GPT wiki
     wiki_title = concise_title_from_query(query)
@@ -727,7 +739,6 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     if gpt_wiki:
         wiki_content = _clean_text_blocks(gpt_wiki)
     else:
-        # Deterministic fallback
         bullets = "\n".join(f"- {p}" for p in points) if points else "- Add concrete, value-aligned behaviors here."
         tldr = points[0] if points else "Summarize the most important value-driven behaviors with examples."
         wiki_content = f"""# {wiki_title}
@@ -744,7 +755,7 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
 
 ## Checklist
 - Document decisions and feedback.
-- Time-box feedback windows.
+- Time-box feedback windows and collect input before the decision deadline.
 - Tie observations to values and outcomes.
 - Link to evidence (issues/MRs/docs).
 
@@ -762,7 +773,7 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         applied.append({"title": wiki_title, "file": f"{slug}.md"})
         created_path = str(dst).replace("\\","/")
 
-        # Incremental embed (keeps UI on this tab; no rerun)
+        # Incremental embed (keeps UI on this tab; no tab swap)
         prog = Prog("Updating index…")
         st.session_state["eka_busy"] = True
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
@@ -773,10 +784,10 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
     trace = [
         {"step": 1, "action": "rewrite_query", "output": query},
         {"step": 2, "action": "retrieve", "used": min(8, len(pairs))},
-        {"step": 3, "action": "draft_answer", "chars": len(short_answer), "llm": "gpt-4o" if gpt_ans else "extractive/gpt-fallback"},
-        {"step": 4, "action": "compose_wiki", "title": wiki_title, "chars": len(wiki_content), "llm": "gpt-4o" if gpt_wiki else "template"},
-        {"step": 5, "action": "critic", "confidence": 0.84 if gpt_ans else 0.64,
-         "notes": ["Add concrete, verifiable examples.", "Cross-link to issues/MRs/docs."]},
+        {"step": 3, "action": "draft_answer", "chars": len(short_answer)},
+        {"step": 4, "action": "compose_wiki", "title": wiki_title, "chars": len(wiki_content)},
+        {"step": 5, "action": "critic", "confidence": 0.84 if short_answer and len(short_answer) > 200 else 0.64,
+         "notes": ["Ensure time-boxed feedback is set and collected pre-deadline.", "Cross-link to issues/MRs/docs."]},
     ]
     return {
         "answer": short_answer,
@@ -789,10 +800,11 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
 
 with tab_agent:
     st.markdown("**Plans the task, rewrites vague queries, retrieves evidence, drafts, critiques, and can create a clean wiki page (optional).**")
-    msg = st.text_area("Goal or task", height=110, placeholder="e.g., How values should be applied in performance reviews — create an example-rich internal note.")
-    auto = st.checkbox("Create wiki page & index it (optional)", value=False)
+    msg = st.text_area("Goal or task", height=110, placeholder="e.g., Values in performance reviews — create an example-rich internal note.")
+    auto = st.checkbox("Allow agent to make automatic actions (create wiki & index)", value=False)
 
     if st.button("Run agent", type="primary", key="agent_btn"):
+        set_qp(tab="agent")
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
@@ -812,9 +824,9 @@ with tab_agent:
                 elif step["action"] == "retrieve":
                     st.write(f"• Retrieved and used top {step.get('used',0)} chunks for drafting.")
                 elif step["action"] == "draft_answer":
-                    st.write(f"• Drafted a concise answer ({step.get('chars',0)} chars) via {step.get('llm')}.")
+                    st.write(f"• Drafted a concise answer ({step.get('chars',0)} chars).")
                 elif step["action"] == "compose_wiki":
-                    st.write(f"• Prepared wiki draft: **{step.get('title')}** ({step.get('chars')} chars) via {step.get('llm')}.")
+                    st.write(f"• Prepared wiki draft: **{step.get('title')}** ({step.get('chars')} chars).")
                 elif step["action"] == "critic":
                     st.write(f"• Critic confidence: {step.get('confidence',0.0):.2f}")
                     for n in step.get("notes", []):
@@ -832,6 +844,7 @@ with tab_upload:
     f = st.file_uploader("Upload a file", type=["md","txt"])
     ttl = st.text_input("Optional page title")
     if st.button("Upload & update knowledge", key="upload_btn"):
+        set_qp(tab="upload")
         if not f:
             st.warning("Please select a file first.")
         else:

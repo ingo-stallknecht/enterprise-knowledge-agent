@@ -1,10 +1,14 @@
 # app/streamlit_mono.py
 # Streamlit-only Enterprise Knowledge Agent (Streamlit Cloud friendly)
-# - Prebuilt index support for instant start (data/index/prebuilt/*)
-# - Incremental indexing on upload (no full rebuild)
-# - Agent = plan → retrieve → draft → propose actions → approve → act
-# - Action preview, confidence threshold, explicit approval, no auto-writes by default
-# - Keeps Agent tab focus (no jumping)
+# Agent behaviors:
+#   (1) Explicit "create wiki/page/article" → propose title/content → ask to Confirm → create + reindex
+#   (2) Explicit "delete ..."               → show matching files → ask to Confirm → delete + reindex
+#   (3) Otherwise                           → answer helpfully (no side effects)
+#
+# - Never acts without confirmation
+# - No tab jumping
+# - Uses prebuilt index if present; repairs index if empty
+# - Incremental add is attempted; falls back to rebuild if unsupported
 
 import sys, os, pathlib, re, time, tempfile, shutil
 from typing import List, Dict, Tuple, Optional
@@ -84,7 +88,7 @@ _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
-# default to gpt-4o unless overridden
+# default model: gpt-4o (can be overridden)
 os.environ["OPENAI_MODEL"] = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o")))
 os.environ["OPENAI_MAX_DAILY_USD"] = str(st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80")))
 
@@ -291,7 +295,7 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
     records = [{"text": t, "source": source_path} for t in texts]
     idx = load_or_init_index()
     if progress: progress.update(label="Appending to index…", value=0.6)
-    if hasattr(idx, "add"): idx.add(vecs, records)
+    if hasattr(idx, "add"): idx.add(vecs, records)  # may not exist in your DocIndex → fallback
     else: return rebuild_index(progress)
     if progress: progress.update(label="Saved.", value=1.0)
     return {"added_chunks": len(texts)}
@@ -368,7 +372,7 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
         })
     return cites
 
-# ---------- GPT helper ----------
+# ---------- GPT helpers ----------
 _gpt_singleton = None
 def _get_gpt() -> Optional[GPTClient]:
     global _gpt_singleton
@@ -394,7 +398,6 @@ def _index_health() -> Tuple[str, str]:
     try:
         idx = load_or_init_index()
         ok = (idx.size() > 0) if hasattr(idx, "size") else True
-        if st.session_state.get("eka_busy"): return "<span class='badge badge-warm'>Loading</span>", "warm"
         return ("<span class='badge badge-ok'>Online</span>", "ok") if ok else ("<span class='badge badge-err'>Empty</span>", "err")
     except Exception:
         return "<span class='badge badge-err'>Offline</span>", "err"
@@ -436,74 +439,54 @@ def corpus_stats() -> Dict:
     n_bytes = sum((f.stat().st_size for f in files), 0)
     return {"files": n_files, "size_kb": int(n_bytes/1024)}
 
-def first_run_bootstrap():
-    if USE_PREBUILT and copy_prebuilt_if_available(): return
-    if have_any_markdown() and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists(): return
+def copy_or_seed_then_index():
+    if USE_PREBUILT and copy_prebuilt_if_available():
+        return
+    if have_any_markdown() and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
+        return
     prog = Prog("Preparing…")
     did_any = False
     if AUTO_BOOTSTRAP:
         st.warning("No corpus found — attempting to fetch the GitLab Handbook subset.", icon="⚠️")
         fetch_res = bootstrap_gitlab(progress=prog)
         if fetch_res.get("ok"):
-            st.session_state["eka_busy"] = True
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             _ = rebuild_index(prog)
             st.success(f"Fetched {fetch_res.get('downloaded',0)} pages and built index.", icon="✅")
             did_any = True
-            st.session_state["eka_busy"] = False
     if not did_any:
         st.info("Using built-in seed corpus.", icon="ℹ️")
         write_seed_corpus()
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         _ = rebuild_index(prog)
         st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
-        st.session_state["eka_busy"] = False
 
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     idx_files_ok = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()
     if not have_any_markdown():
         write_seed_corpus()
         prog = Prog("Indexing seed corpus…")
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": True, "rebuilt": True, "stats": stats}
     if force_rebuild or not idx_files_ok:
         prog = Prog("Rebuilding index…")
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": False, "rebuilt": True, "stats": stats}
     try:
         emb, _ = get_models(); qv = emb.encode(["ping"]); idx = load_or_init_index()
         if not idx.query_dense(qv, k=1):
             prog = Prog("Repairing empty index…")
-            st.session_state["eka_busy"] = True
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             stats = rebuild_index(prog)
-            st.session_state["eka_busy"] = False
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
             return {"seeded": False, "rebuilt": True, "stats": stats}
     except Exception:
         prog = Prog("Repairing index…")
-        st.session_state["eka_busy"] = True
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         stats = rebuild_index(prog)
-        st.session_state["eka_busy"] = False
-        _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
         return {"seeded": False, "rebuilt": True, "stats": stats}
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
-# Call AFTER defs
-first_run_bootstrap()
+# Prepare app
+copy_or_seed_then_index()
 _ = ensure_ready_and_index(False)
 
-# ---------- Tabs & param helpers ----------
+# ---------- Tabs ----------
 try:
     qp = st.query_params
     get_qp = lambda k, default=None: qp.get(k, default)
@@ -527,7 +510,7 @@ with tab_ask:
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
 
     if st.button("Get answer", type="primary", key="ask_btn"):
-        st.session_state["focus_tab"] = "ask"; set_qp(tab="ask")
+        set_qp(tab="ask")
         if not q.strip():
             st.warning("Please enter a question.")
         else:
@@ -565,164 +548,44 @@ with tab_ask:
 
 # ===== AGENT =====
 
-# --- Helper scoring/points ---
-def _looks_like_sentence(s: str) -> bool:
-    s = s.strip()
-    if len(s) < 50 or len(s) > 240: return False
-    if s.startswith("#") or s.startswith(">"): return False
-    if re.search(r"\[(.*?)\]\(http", s): return False
-    if "http://" in s or "https://" in s: return False
-    if not re.match(r"^[A-Z0-9].*[\.!\?]$", s): return False
-    if re.fullmatch(r"[A-Za-z\s]{0,35}", s): return False
-    return True
+# ---- Intent classification for 3 behaviors ----
+CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
+DELETE_PAT = re.compile(r"\b(delete|remove|trash|erase|drop)\b\s+(.+)", re.I)
 
-def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5) -> List[str]:
-    if not pairs: return []
-    qv = emb.encode([query])
-    cands = []
-    for rec, _sc in pairs[:24]:
-        text = (rec.get("text") or "")
-        for s in _split_sentences(text):
-            if _looks_like_sentence(s):
-                cands.append(s.strip())
-    if not cands: return []
-    sv = emb.encode(cands)
-    import numpy as np
-    sim = (sv @ qv.T).reshape(-1)
-    idxs = np.argsort(-sim)[: max(10, max_points*3)]
-    picked = [cands[i] for i in idxs]
-    # de-dupe but keep order
-    seen, out = set(), []
-    for s in picked:
-        k = re.sub(r"[^a-z0-9]+"," ", s.lower()).strip()
-        if k and k not in seen:
-            seen.add(k); out.append(s)
-    return out[:max_points]
+def classify_intent(msg: str) -> Tuple[str, Dict]:
+    """Return ('create_wiki'|'delete_wiki'|'answer', info)"""
+    text = (msg or "").strip()
+    if CREATE_PAT.search(text):
+        # extract a title candidate (quoted or after 'about/on: ')
+        m = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
+        title = m.group(1) if m else re.sub(r".*\b(wiki|page|article|doc)\b( about| on|:)?\s*", "", text, flags=re.I)
+        title = title.strip().rstrip(".")
+        return "create_wiki", {"title": title[:120] if title else "Untitled"}
+    md = DELETE_PAT.search(text)
+    if md:
+        target = md.group(2).strip().strip('"\'').rstrip(".")
+        return "delete_wiki", {"query": target[:200] if target else ""}
+    return "answer", {}
 
-def _clean_text_blocks(text: str) -> str:
-    t = (text or "").strip()
-    t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    t = t.replace("\u0000", "").strip()
-    return t
-
-def concise_title_from_query(q: str) -> str:
-    base = q.strip()
-    base = re.sub(r"\?$", "", base)
-    base = re.sub(r"^(create|write|make|draft)\s+", "", base, flags=re.I)
-    base = re.sub(r";\s*if.*$", "", base, flags=re.I)
-    title = base.strip().rstrip(".")
-    if len(title) > 60: title = title[:57].rstrip() + "…"
+def concise_title(title: str) -> str:
+    t = (title or "Untitled").strip()
+    t = re.sub(r"\?$", "", t)
+    t = re.sub(r"^(create|write|make|draft|add)\s+", "", t, flags=re.I)
+    if len(t) > 60: t = t[:57].rstrip() + "…"
+    # title case light
     def _tc(s):
         return " ".join(w.capitalize() if w.lower() not in {"in","and","or","of","to","for","with","on"} else w.lower()
                         for w in re.split(r"(\s+|\—)", s))
-    title = _tc(title)
-    title = re.sub(r"\s*—\s*", " — ", title)
-    return title
+    t = _tc(t)
+    t = re.sub(r"\s*—\s*", " — ", t)
+    return t
 
-def build_wiki_prompt(title: str, key_points: List[str], style: str) -> Tuple[str, str]:
-    kp = "\n".join(f"- {k}" for k in key_points) if key_points else "- Outline 3–5 concrete principles with examples."
-    sys = "You are a precise technical writer. Write clearly, concisely, and avoid repetition. Use Markdown."
-    detail = "short, high-signal" if style == "Concise" else "detailed but crisp"
-    user = f"""
-Write an internal wiki page titled "{title}" in a {detail} style.
+def render_wiki_md(title: str, key_points: List[str]) -> str:
+    bullets = "\n".join(f"- {p}" for p in key_points) if key_points else "- Add specific behaviors and links to evidence."
+    tldr = key_points[0] if key_points else "Summarize the most important value-driven behaviors with examples."
+    return f"""# {title}
 
-Audience: ICs and managers preparing performance reviews.
-Tone: crisp, actionable, value-aligned.
-Sections: TL;DR, Key behaviors (bulleted), Examples (2-3), Checklist, References.
-
-Key points to use:
-- Time-box feedback and collect it before the decision deadline.
-{kp}
-
-Rules:
-- Synthesize; don't copy bullets verbatim.
-- Avoid bland filler; prefer concrete, verifiable phrasing.
-- Propose example stubs with realistic placeholders (Issue/MR links).
-- Keep it under 700 words.
-"""
-    return sys, user
-
-def build_answer_prompt(question: str, style: str) -> Tuple[str, str]:
-    sys = "You are an expert summarizer. Produce a user-facing summary people actually want to read."
-    detail = "short, high-signal" if style == "Concise" else "detailed but crisp"
-    user = f"""Question: {question}
-
-Write a {detail} answer with these sections and always include one point about time-boxing feedback before deadlines:
-
-**Why it matters (1–2 lines)**
-**What to look for (4–6 bullets)**
-**Example review bullets (3–5 bullets)**
-**Checklist (4–6 bullets, include: time-box feedback and collect it before the deadline)**
-
-Only use the provided context. If context is weak, say what's missing in one bullet.
-Avoid repeating the question. No generic filler.
-"""
-    return sys, user
-
-# --- GPT access
-_gpt_singleton2 = None
-def _get_gpt():
-    global _gpt_singleton2
-    if _gpt_singleton2 is None:
-        try: _gpt_singleton2 = GPTClient()
-        except Exception: _gpt_singleton2 = None
-    return _gpt_singleton2
-
-def gpt_compose(context: str, prompt: str, max_chars: int) -> Optional[str]:
-    gpt = _get_gpt()
-    if not gpt or os.environ.get("USE_OPENAI","false").lower()!="true":
-        return None
-    try:
-        text, _meta = gpt.answer(context, prompt)
-        text = (text or "").strip()
-        if text: return text[:max_chars].rstrip()
-    except Exception:
-        return None
-    return None
-
-# --- Agent core (no side effects) ---
-def agent_propose(message: str, style: str = "Concise") -> Dict:
-    # 1) Normalize
-    user_msg = (message or "").strip()
-    query = user_msg if user_msg.endswith("?") else (user_msg.rstrip(".") + "?")
-
-    # 2) Retrieve (hybrid, fast)
-    records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
-
-    # 3) Short, user-facing answer
-    ctx_for_llm = "\n\n".join((r.get("text") or "") for r,_ in pairs[:8])
-    sys_a, user_a = build_answer_prompt(query, style)
-    gpt_ans = gpt_compose(ctx_for_llm, f"{sys_a}\n\n{user_a}", max_chars=1200)
-    if gpt_ans:
-        short_answer = _clean_text_blocks(gpt_ans)
-    else:
-        short_answer, _ = generate_answer([r for r,_ in pairs[:8]], query, max_chars=900)
-        short_answer = _clean_text_blocks(short_answer)
-
-    # 4) Extract key points & gaps
-    emb, _ = get_models()
-    points = _extract_key_points(query, pairs, emb, max_points=5)
-    if not any("time-box" in p.lower() or "time box" in p.lower() for p in points):
-        points = ["Time-box feedback windows and collect input before the decision deadline."] + points
-
-    gaps = []
-    if len(pairs) < 4:
-        gaps.append("Low context richness (fewer than 4 strong passages). Consider ingesting more relevant docs.")
-    if not points:
-        gaps.append("Key behaviors not clearly present in sources. Add examples or policy docs.")
-
-    # 5) Compose wiki (proposal only)
-    wiki_title = concise_title_from_query(query)
-    sys_w, user_w = build_wiki_prompt(wiki_title, points, style)
-    wiki_ctx = "\n\n".join((r.get("text") or "") for r,_ in pairs[:12])
-    gpt_wiki = gpt_compose(wiki_ctx, f"{sys_w}\n\n{user_w}", max_chars=3500)
-    if gpt_wiki:
-        wiki_content = _clean_text_blocks(gpt_wiki)
-    else:
-        bullets = "\n".join(f"- {p}" for p in points) if points else "- Add concrete, value-aligned behaviors here."
-        tldr = points[0] if points else "Summarize the most important value-driven behaviors with examples."
-        wiki_content = f"""# {wiki_title}
+> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
 
 ## TL;DR
 - {tldr}
@@ -735,139 +598,149 @@ def agent_propose(message: str, style: str = "Concise") -> Dict:
 - Describe outcomes (metrics, customer impact, quality).
 
 ## Checklist
-- Document decisions and feedback.
+- Document decisions and feedback in writing.
 - Time-box feedback windows and collect input before the decision deadline.
-- Tie observations to values and outcomes.
+- Tie observations to values and measurable outcomes.
 - Link to evidence (issues/MRs/docs).
 
 ## References
 (Agent synthesized from indexed documents.)
 """
 
-    # 6) Confidence estimation
-    conf = 0.86 if short_answer and len(pairs) >= 6 else 0.72 if short_answer else 0.55
+def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5) -> List[str]:
+    if not pairs: return []
+    qv = emb.encode([query])
+    cands = []
+    for rec, _ in pairs[:24]:
+        txt = (rec.get("text") or "")
+        for s in _split_sentences(txt):
+            s2 = s.strip()
+            if 50 <= len(s2) <= 240 and re.match(r"^[A-Z0-9].*[\.!\?]$", s2) and "http" not in s2:
+                cands.append(s2)
+    if not cands: return []
+    sv = emb.encode(cands)
+    import numpy as np
+    sim = (sv @ qv.T).reshape(-1)
+    idxs = np.argsort(-sim)[: max(10, max_points*3)]
+    seen, out = set(), []
+    for i in idxs:
+        k = re.sub(r"[^a-z0-9]+", " ", cands[i].lower()).strip()
+        if k and k not in seen:
+            seen.add(k); out.append(cands[i])
+    # ensure time-boxing appears at least once if relevant
+    if not any("time-box" in p.lower() or "time box" in p.lower() for p in out):
+        out.insert(0, "Time-box feedback windows and collect input before the decision deadline.")
+    return out[:max_points]
 
-    # 7) Citations for the short answer
-    citations = fmt_citations(pairs, k=min(8, len(pairs)))
+# --- Keep focus on Agent tab
+def _stay_on_agent():
+    st.session_state["focus_tab"] = "agent"
+    try:
+        st.query_params.update({"tab":"agent"})
+    except Exception:
+        st.experimental_set_query_params(tab="agent")
 
-    return {
-        "query": query,
-        "short_answer": short_answer,
-        "wiki_title": wiki_title,
-        "wiki_content": wiki_content,
-        "citations": citations,
-        "gaps": gaps,
-        "confidence": conf,
-        "used_chunks": min(8, len(pairs))
-    }
-
-# --- Acting (only after approval) ---
+# --- Acting helpers ---
 def agent_apply_create_wiki(title: str, content: str) -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9\-]+", "-", title.lower()).strip("-") or "page"
     dst = WIKI_DIR / f"{slug}.md"
     dst.write_text(content, encoding="utf-8")
     created_path = str(dst).replace("\\","/")
-    prog = Prog("Incremental indexing…")
-    st.session_state["eka_busy"] = True
-    _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-    res = incremental_add(content, created_path, progress=prog)
-    st.session_state["eka_busy"] = False
-    _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-    return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
+    prog = Prog("Updating index…")
+    # Try incremental; fall back to rebuild
+    try:
+        res = incremental_add(content, created_path, progress=prog)
+    except Exception:
+        res = rebuild_index(prog)
+    return {"file": f"{slug}.md", "path": created_path, "added": res}
 
-# --- Keep focus on Agent tab ---
-def _stay_on_agent():
-    st.session_state["focus_tab"] = "agent"
-    set_qp(tab="agent")
+def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
+    deleted = []
+    for f in selected_files:
+        p = pathlib.Path(f)
+        try:
+            if p.exists():
+                p.unlink()
+                deleted.append(str(p))
+        except Exception:
+            pass
+    prog = Prog("Rebuilding index after deletion…")
+    stats = rebuild_index(prog)
+    return {"deleted": deleted, "reindexed": stats}
 
 # ===== Agent UI =====
 with tab_agent:
-    _stay_on_agent()  # never jump away
+    _stay_on_agent()
+    st.markdown("**Agent**")
+    st.write("Type what you need. The agent will either (1) propose a new wiki page and ask to confirm, "
+             "(2) propose deletion candidates and ask to confirm, or (3) just answer helpfully. No actions without approval.")
 
-    st.markdown("**What the agent does**")
-    st.write(
-        "The agent rewrites your goal into a sharp query, retrieves evidence, drafts a short answer with citations, "
-        "and proposes a clean internal wiki page. It never writes without approval (unless you explicitly allow automatic actions)."
-    )
-    st.markdown("**Key functionalities with high ROI**")
-    st.write(
-        "- Turn vague prompts into review-ready bullets\n"
-        "- Generate concise, value-aligned guidance with examples\n"
-        "- Propose internal wiki pages for reuse and onboarding\n"
-        "- Incrementally index new content without full rebuilds"
-    )
+    msg = st.text_area("Goal or task", height=110,
+                       placeholder="Examples: \"create a wiki page about values in performance reviews\" · \"delete values.md\" · or just ask a question")
 
-    cA, cB, cC = st.columns([2,1,1])
-    with cA:
-        msg = st.text_area("Goal or task", height=110,
-                           placeholder="e.g., Values in performance reviews — create an example-rich internal note.")
-    with cB:
-        style = st.radio("Answer style", ["Concise","Detailed"], index=0)
-    with cC:
-        conf_threshold = st.slider("Auto-action threshold", 0.5, 0.95, 0.80, 0.01)
-
-    def _on_toggle_auto():
-        _stay_on_agent()
-    auto_actions = st.checkbox("Allow agent to make automatic actions (e.g., create wiki and index)",
-                               value=False, on_change=_on_toggle_auto, key="agent_auto")
-
-    if st.button("Plan & Draft", type="primary", key="agent_plan_btn"):
+    if st.button("Run", type="primary", key="agent_run_btn"):
         _stay_on_agent()
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
-            st.session_state["eka_busy"] = True
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-            proposal = agent_propose(msg, style=style)
-            st.session_state["eka_busy"] = False
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-            st.session_state["last_agent_proposal"] = proposal
+            intent, info = classify_intent(msg)
 
-    prop = st.session_state.get("last_agent_proposal")
-    if prop:
-        st.subheader("Agent answer")
-        st.write(prop["short_answer"])
+            if intent == "create_wiki":
+                # Retrieve some context and propose content
+                query = msg if msg.endswith("?") else (msg.rstrip(".") + "?")
+                recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+                emb, _ = get_models()
+                points = _extract_key_points(query, pairs, emb, max_points=5)
+                title = concise_title(info.get("title") or "Untitled")
+                content = render_wiki_md(title, points)
 
-        st.markdown("#### What happened")
-        st.write(f"• Rewrote to: `{prop['query']}`")
-        st.write(f"• Retrieved and used top {prop['used_chunks']} chunks for drafting.")
-        st.write(f"• Proposed wiki: **{prop['wiki_title']}**")
-        st.write(f"• Confidence: {prop['confidence']:.2f}")
-        if prop["gaps"]:
-            st.write("• Gaps:")
-            for g in prop["gaps"]:
-                st.write(f"  – {g}")
+                st.subheader("Create wiki — confirmation required")
+                title_val = st.text_input("Title", value=title, key="agent_create_title")
+                st.code(content, language="markdown")
+                st.caption("This action will create a new Markdown file under data/processed/wiki/ and update the index.")
+                if st.button("Confirm create page", key="agent_confirm_create"):
+                    _stay_on_agent()
+                    res = agent_apply_create_wiki(title_val.strip() or title, content)
+                    st.success(f"Created and indexed: **{title_val.strip() or title}**  → {res['file']}")
 
-        st.markdown("#### Citations")
-        for c in prop["citations"]:
-            with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
-                st.write(c["preview"])
+            elif intent == "delete_wiki":
+                st.subheader("Delete wiki — confirmation required")
+                q = (info.get("query") or "").lower()
+                # Find candidate files
+                candidates = []
+                for p in WIKI_DIR.glob("*.md"):
+                    if q in p.stem.lower() or q in p.name.lower():
+                        candidates.append(str(p))
+                if not candidates:
+                    st.info("No matching wiki files found. Tip: use a distinctive part of the filename or title.")
+                else:
+                    sel = st.multiselect("Select files to delete", options=candidates, default=candidates[:1])
+                    st.caption("Selected files will be permanently removed from disk. The index will then be rebuilt.")
+                    if st.button("Confirm delete selected", key="agent_confirm_delete"):
+                        _stay_on_agent()
+                        res = agent_apply_delete_wiki(sel)
+                        st.success(f"Deleted {len(res['deleted'])} file(s). Index rebuilt.")
 
-        st.markdown("#### Proposed wiki page")
-        st.text_input("Title", value=prop["wiki_title"], key="wiki_title_input")
-        st.code(prop["wiki_content"], language="markdown")
-
-        # --- Approval / act ---
-        can_auto = auto_actions and (prop["confidence"] >= conf_threshold)
-        col1, col2 = st.columns([1,3])
-        do_it = False
-        if can_auto:
-            st.success("Auto-actions allowed and confidence ≥ threshold. The agent is ready to write on approval.")
-        if col1.button("Approve & create wiki", key="approve_btn"):
-            _stay_on_agent(); do_it = True
-        if can_auto and not do_it:
-            # If auto and not clicked, still require explicit approval to avoid surprises in portfolio demo
-            st.info("Click **Approve & create wiki** to proceed. Auto-actions are enabled but still require approval here.")
-
-        if do_it:
-            title = st.session_state.get("wiki_title_input", prop["wiki_title"]).strip() or prop["wiki_title"]
-            res = agent_apply_create_wiki(title, prop["wiki_content"])
-            st.success(f"Wiki page created and indexed: **{title}**  –  {res['file']}  (chunks added: {res['added_chunks']})")
-            with st.expander("Show created wiki page", expanded=True):
-                st.code(prop["wiki_content"], language="markdown")
-            # Clear proposal to avoid duplicate approvals
-            st.session_state.pop("last_agent_proposal", None)
+            else:
+                # Helpful text answer (no side effects)
+                q = msg.strip()
+                ensure_ready_and_index(False)
+                recs, pairs, meta = retrieve(q, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                if len(pairs) == 0:
+                    ensure_ready_and_index(True)
+                    recs, pairs, meta = retrieve(q, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                ans, llm_meta = generate_answer(recs, q, max_chars=900)
+                if not ans or ans.strip() in {".", ""}:
+                    joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
+                    ans = joined[:900] if joined else "No relevant context found in the current corpus."
+                st.subheader("Agent answer")
+                st.write(ans)
+                # Light citations (optional)
+                st.markdown("#### Sources")
+                for c in fmt_citations(pairs, k=min(6, len(pairs))):
+                    with st.expander(f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}", expanded=False):
+                        st.write(c["preview"])
 
 # ===== UPLOAD =====
 with tab_upload:
@@ -886,13 +759,13 @@ with tab_upload:
             dst = WIKI_DIR / f"{slug}.md"
             dst.write_text(text, encoding="utf-8")
 
-            st.session_state["eka_busy"] = True
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
-            prog = Prog("Incremental indexing…")
-            res = incremental_add(text, str(dst).replace("\\","/"), progress=prog)
-            st.session_state["eka_busy"] = False
-            _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
-            st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
+            prog = Prog("Updating index…")
+            try:
+                res = incremental_add(text, str(dst).replace("\\","/"), progress=prog)
+                st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
+            except Exception:
+                stats = rebuild_index(prog)
+                st.success(f"✅ Rebuilt index: {stats['num_chunks']} chunks from {stats['num_files']} files.")
 
 # ===== ABOUT =====
 with tab_about:
@@ -902,6 +775,8 @@ with tab_about:
 - **Reranker (optional)**: cross-encoder refines the top candidates.
 - **Q&A**: answers strictly from retrieved passages; cites sources.
 - **Context Visualizer**: each sentence maps to the strongest supporting passage.
-- **Incremental indexing**: uploads append vectors instead of full rebuilds.
+- **Incremental add**: attempts to append vectors; otherwise rebuild.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
+    stats_now = corpus_stats()
+    st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

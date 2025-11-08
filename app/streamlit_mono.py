@@ -430,8 +430,44 @@ def first_run_bootstrap():
         _ = rebuild_index(prog)
         st.success("Seed corpus indexed. You can now ask questions.", icon="✅")
 
+# Self-heal guard: seed/rebuild/repair if needed
+def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
+    """Self-heal: if no processed markdown or index files are missing/empty, seed and rebuild."""
+    idx_files_ok = pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()
+
+    if not have_any_markdown():
+        # nothing to index → seed corpus then rebuild
+        write_seed_corpus()
+        prog = Prog("Indexing seed corpus…")
+        stats = rebuild_index(prog)
+        return {"seeded": True, "rebuilt": True, "stats": stats}
+
+    # We have markdown; check index presence or forced rebuild
+    if force_rebuild or not idx_files_ok:
+        prog = Prog("Rebuilding index…")
+        stats = rebuild_index(prog)
+        return {"seeded": False, "rebuilt": True, "stats": stats}
+
+    # As a final guard, attempt a tiny query; if it returns nothing, rebuild
+    try:
+        emb, _ = get_models()
+        qv = emb.encode(["ping"])
+        idx = load_or_init_index()
+        has_any = idx.query_dense(qv, k=1)
+        if not has_any:
+            prog = Prog("Repairing empty index…")
+            stats = rebuild_index(prog)
+            return {"seeded": False, "rebuilt": True, "stats": stats}
+    except Exception:
+        prog = Prog("Repairing index…")
+        stats = rebuild_index(prog)
+        return {"seeded": False, "rebuilt": True, "stats": stats}
+
+    return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
+
 # Call AFTER all defs are in place
 first_run_bootstrap()
+_ = ensure_ready_and_index(force_rebuild=False)
 
 # ---------------- Tabs & UI ----------------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
@@ -449,12 +485,30 @@ with tab_ask:
         if not q.strip():
             st.warning("Please enter a question.")
         else:
+            # Self-heal before retrieve
+            if not have_any_markdown():
+                st.info("No corpus found — seeding and indexing now…")
+                ensure_ready_and_index(force_rebuild=True)
+            else:
+                # If index files are missing or empty, rebuild
+                idx_missing = not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists()
+                if idx_missing:
+                    st.info("Index not found — rebuilding now…")
+                    ensure_ready_and_index(force_rebuild=True)
+
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
+
+            # If still empty, force one rebuild as a last resort
+            if len(pairs) == 0:
+                st.info("No sources returned — repairing index and retrying once…")
+                ensure_ready_and_index(force_rebuild=True)
+                recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
+
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
 
             st.subheader("Answer")
             if not (ans or "").strip():
-                st.warning("No text returned. Likely no indexed corpus or GPT call failed. Try 'About → Use seed corpus' then press 'Rebuild index'.")
+                st.warning("No text returned. Try ‘About → Use seed corpus’ then press ‘Rebuild index’.")
             else:
                 st.write(ans)
 
@@ -473,7 +527,7 @@ with tab_ask:
                 sent = (row.get("sentence","") or "").strip()
                 src = row.get("best_source","")
                 rk = row.get("best_rank","-")
-                title = f"Top source #{rk}\\n{src}\\n(score {s:.2f})"
+                title = f"Top source #{rk}\n{src}\n(score {s:.2f})"
                 pills.append(f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>")
             st.markdown("".join(pills), unsafe_allow_html=True)
 
@@ -563,7 +617,7 @@ with tab_upload:
             st.warning("Please select a file first.")
         else:
             name = (ttl or f.name).strip() or "page"
-            slug = re.sub(r"[^a-z0-9\\-]+", "-", name.lower()).strip("-") or "page"
+            slug = re.sub(r"[^a-z0-9\-]+", "-", name.lower()).strip("-") or "page"
             WIKI_DIR.mkdir(parents=True, exist_ok=True)
             text = f.getvalue().decode("utf-8", errors="ignore")
             (WIKI_DIR / f"{slug}.md").write_text(text, encoding="utf-8")
@@ -597,5 +651,11 @@ with tab_about:
         prog = Prog("Indexing seed corpus…")
         stats = rebuild_index(prog)
         st.success(f"Seed indexed: {stats['num_chunks']} chunks from {stats['num_files']} files.")
+    if c4.button("Quick repair (seed + rebuild)"):
+        res = ensure_ready_and_index(force_rebuild=True)
+        if res.get("rebuilt") or res.get("seeded"):
+            st.success("Quick repair complete.")
+        else:
+            st.info("Index already healthy.")
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")

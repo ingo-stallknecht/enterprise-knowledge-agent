@@ -1,28 +1,37 @@
 # Enterprise Knowledge Agent
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-6fs3f3ha2qmmbi4wwgxyjn.streamlit.app/)
 ![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_bage_black_white.svg)](https://enterprise-knowledge-agent-6fs3f3ha2qmmbi4wwgxyjn.streamlit.app/)
 ![Last Commit](https://img.shields.io/github/last-commit/ingo-stallknecht/enterprise-knowledge-agent)
 
-Hybrid RAG + reranker + GPT-optional answers with a polished Streamlit UI, async uploads → reindex pipeline,
-evaluation + MLflow logging, and threshold-gated promotion/true rollback of the FAISS index snapshot.
+Hybrid RAG with FAISS + SentenceTransformers, optional GPT-assisted answers, and a polished Streamlit UI.
+Runs **locally** or on **Streamlit Cloud** with incremental indexing, safe wiki actions, and citations.
 
-**What**: Local, production-style RAG agent over GitLab Handbook with agent actions, Airflow weekly refresh, and MLflow-gated promotion + rollback.
+---
+
+## What it is
+A Streamlit-only knowledge app over a (GitLab-inspired) handbook + your uploads:
+- Ask questions → retrieves supporting passages → answers with citations.
+- Agent can:
+  1) **Create** a wiki page (with confirmation, safety checks, and GPT-4 drafting when available),
+  2) **Delete** wiki pages (restricted to `data/processed/wiki/`, confirmation required),
+  3) Otherwise **answer** helpfully with no side effects.
+- Indexing is **incremental** (no full re-embed on deletes) with a **prebuilt index** option for fast cold starts.
 
 ---
 
 ## Features
-- RAG with FAISS + SentenceTransformers
-- Actions: `retrieve`, `answer_with_citations`, `upsert_wiki_page`, `create_ticket`
-- FastAPI server with OpenAPI docs
-- Airflow DAG for weekly ingest → index → eval → promote
-- MLflow metrics + model registry stages (Production, Archived)
-- Tests & Makefile
-- Fully local, cloud-free
+- **Retrieval:** FAISS dense (MiniLM), optional reranker
+- **Answering:** Extractive fallback; GPT-assisted when `OPENAI_API_KEY` is set
+- **Agent actions:** Create/Delete wiki (confirm first) + normal answers
+- **Indexing:** Incremental add; delete only rebuilds FAISS from cached vectors
+- **Prebuilt index:** Drop files into `data/index/prebuilt/` to skip first-run builds
+- **Safety:** Blocks harmful titles/content on wiki creation; deletes limited to wiki folder
+- **UX:** Context visualizer (sentence → strongest source), citations with previews
 
 ---
 
-## Quickstart (Streamlit demo)
+## Quickstart (Streamlit)
 ```bash
 pip install -r requirements.txt
 streamlit run app/streamlit_mono.py

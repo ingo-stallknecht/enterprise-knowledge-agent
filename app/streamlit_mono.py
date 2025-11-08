@@ -2,10 +2,10 @@
 # Streamlit-only Enterprise Knowledge Agent (Streamlit Cloud friendly)
 # - Instant start via prebuilt index (data/index/prebuilt/*) if present
 # - Incremental indexing on upload (no full rebuild)
-# - Polished UI (badges, KPIs, legend, pills)
-# - Agent: readable outputs, deterministic synthesis, wiki preview shown
+# - Agent uses query-focused extractive summarization (MMR) for stable, non-gibberish answers
+# - Clean UI; no jump across tabs, no debug noise
 
-import sys, os, pathlib, re, time, tempfile, shutil
+import sys, os, pathlib, re, time, tempfile, shutil, math, random
 from typing import List, Dict, Tuple, Optional
 import streamlit as st
 
@@ -268,7 +268,10 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     for i, fp in enumerate(files, 1):
         t = fp.read_text(encoding="utf-8")
         for ch in _split_md(t):
-            records.append({"text": ch["text"], "source": str(fp).replace("\\","/")})
+            # Clean widely before indexing to reduce later noise
+            cleaned = _clean_text_for_index(ch["text"])
+            if cleaned:
+                records.append({"text": cleaned, "source": str(fp).replace("\\","/")})
         if progress:
             progress.update(label=f"Chunking… {i}/{len(files)} files",
                             value=min(0.25, 0.05 + 0.20*(i/max(1,len(files)))))
@@ -300,7 +303,8 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
 def incremental_add(markdown_text: str, source_path: str, progress: Optional[Prog] = None) -> Dict:
     chunks = _split_md(markdown_text)
     if progress: progress.update(label=f"Chunking {len(chunks)} chunks…", value=0.15)
-    texts = [c["text"] for c in chunks]
+    texts = [_clean_text_for_index(c["text"]) for c in chunks]
+    texts = [t for t in texts if t]
     if not texts:
         return {"added_chunks": 0}
     emb, _ = get_models()
@@ -387,6 +391,110 @@ def fmt_citations(pairs: List[Tuple[Dict,float]], k: int) -> List[dict]:
             "preview": (txt[:280]+"…") if len(txt)>280 else txt
         })
     return cites
+
+def _openai_available() -> bool:
+    return os.environ.get("USE_OPENAI", "false").lower() == "true" and bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+# ---------- Text cleaning to prevent gibberish ----------
+_URL = re.compile(r'https?://\S+')
+_MD_LINK = re.compile(r'\[([^\]]+)\]\([^)]+\)')
+_NON_ASCII = re.compile(r'[^\x09\x0A\x0D\x20-\x7E]')
+
+def _clean_text_for_index(t: str) -> str:
+    if not t: return ""
+    t = _MD_LINK.sub(r'\1', t)            # keep anchor text, drop URLs
+    t = _URL.sub(' ', t)                  # drop bare URLs
+    t = t.replace("…", "...").replace("—", "-")
+    t = re.sub(r'\s+', ' ', t).strip()
+    t = _NON_ASCII.sub('', t)
+    # Drop stubby/fragment-only lines
+    if len(t) < 40: return ""
+    return t
+
+def _looks_like_sentence(s: str) -> bool:
+    s = s.strip()
+    if len(s) < 50 or len(s) > 240: return False
+    if s.startswith("#") or s.startswith(">"): return False
+    if _URL.search(s): return False
+    if re.search(r'\[[^\]]+\]\([^)]+\)', s): return False
+    if not re.match(r"^[A-Z0-9].*[\.!\?]$", s): return False
+    if re.fullmatch(r"[A-Za-z\s]{0,35}", s): return False
+    return True
+
+def _dedupe_keep_order(strings: List[str]) -> List[str]:
+    seen, out = set(), []
+    for s in strings:
+        k = re.sub(r"[^a-z0-9]+"," ", s.lower()).strip()
+        if k and k not in seen:
+            seen.add(k); out.append(s)
+    return out
+
+def _mmr_select(query_vec, cand_vecs, cands: List[str], k=6, lambda_div=0.7):
+    """Maximal Marginal Relevance selection for diversity (cosine similarity)."""
+    import numpy as np
+    if not len(cands): return []
+    selected, selected_idx = [], []
+    sim_q = (cand_vecs @ query_vec.T).reshape(-1)
+    while len(selected) < min(k, len(cands)):
+        if not selected_idx:
+            i = int(np.argmax(sim_q))
+            selected.append(cands[i]); selected_idx.append(i)
+        else:
+            # diversity term: max sim to any already selected
+            sim_div = np.max(cand_vecs[:, selected_idx] @ cand_vecs[selected_idx].T, axis=1)
+            # MMR score
+            scores = lambda_div*sim_q - (1-lambda_div)*sim_div
+            # avoid reselecting already taken
+            scores[selected_idx] = -1e9
+            i = int(np.argmax(scores))
+            selected.append(cands[i]); selected_idx.append(i)
+    return selected
+
+def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 6) -> List[str]:
+    """Pick clean, diverse, query-relevant sentences from retrieved chunks."""
+    if not pairs: return []
+    qv = emb.encode([query])
+    candidates = []
+    for rec, _sc in pairs[:30]:
+        text = (rec.get("text") or "")
+        for s in _split_sentences(text):
+            s = _clean_text_for_index(s)
+            if s and _looks_like_sentence(s):
+                candidates.append(s)
+    if not candidates: return []
+    sv = emb.encode(candidates)
+    selected = _mmr_select(qv, sv, candidates, k=max_points, lambda_div=0.7)
+    return _dedupe_keep_order(selected)
+
+def _synthesize_from_points(original_message: str, points: List[str], max_len: int = 800) -> str:
+    if not points:
+        return "No strong evidence found in the current corpus. Seed or bootstrap the handbook and try again."
+    cleaned_q = re.sub(r"\?$", "", (original_message or "").strip())
+    intro = f"**Short answer to:** {cleaned_q}."
+    body = "\n".join(f"- {p}" for p in points[:8])
+    txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
+    return txt[:max_len].rstrip()
+
+def _make_wiki_template(topic: str, key_points: List[str]) -> str:
+    bullets = "\n".join(f"- {kp}" for kp in key_points[:6]) if key_points else "- Add concrete principles from your domain."
+    tldr = key_points[0] if key_points else "Summarize the most important value-driven behaviors with examples."
+    return f"""# {topic}
+
+> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
+
+## TL;DR
+- {tldr}
+
+## Key principles & behaviors
+{bullets}
+
+## Examples (fill with concrete evidence)
+- Add one example per behavior. Link to issue/MR/doc where the behavior is demonstrated.
+- Describe outcomes (metrics, customer impact, quality).
+
+## References
+(These notes were derived from internal documents indexed by the agent.)
+"""
 
 # ---------- Header + status ----------
 def _index_health() -> Tuple[str, str]:
@@ -534,7 +642,6 @@ with tab_ask:
 
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
-                # Strong extractive fallback if GPT returns weak output
                 joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
                 ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
 
@@ -566,108 +673,42 @@ with tab_ask:
                     st.write(c['preview'])
 
 # ===== AGENT =====
-
-def _looks_like_sentence(s: str) -> bool:
-    s = s.strip()
-    if len(s) < 50 or len(s) > 240: return False
-    if s.startswith("#") or s.startswith(">"): return False
-    if re.search(r"\[(.*?)\]\(http", s): return False  # markdown link
-    if "http://" in s or "https://" in s: return False
-    if not re.match(r"^[A-Z0-9].*[\.!\?]$", s): return False
-    if re.fullmatch(r"[A-Za-z\s]{0,35}", s): return False
-    return True
-
-def _dedupe_keep_order(strings: List[str]) -> List[str]:
-    seen, out = set(), []
-    for s in strings:
-        k = re.sub(r"[^a-z0-9]+"," ", s.lower()).strip()
-        if k and k not in seen:
-            seen.add(k); out.append(s)
-    return out
-
-def _extract_key_points(query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 6) -> List[str]:
-    """Pick the most relevant, clean sentences across retrieved chunks."""
-    if not pairs: return []
-    qv = emb.encode([query])
-    cands = []
-    for rec, _sc in pairs[:30]:
-        text = (rec.get("text") or "")
-        for s in _split_sentences(text):
-            if _looks_like_sentence(s):
-                cands.append(s.strip())
-    if not cands: return []
-    # Score by cosine with query
-    sv = emb.encode(cands)
-    import numpy as np
-    sim = (sv @ qv.T).reshape(-1)
-    idxs = np.argsort(-sim)[: max(12, max_points*3)]
-    best = [cands[i] for i in idxs]
-    best = _dedupe_keep_order(best)
-    return best[:max_points]
-
-def _clean_summary(text: str, max_len: int = 800) -> str:
-    t = (text or "").strip()
-    t = re.sub(r"\b(no context|not in context|hallucination)\b", "", t, flags=re.I)
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    t = t.replace("\u0000", "").strip()
-    if len(t) > max_len: t = t[:max_len].rstrip() + "…"
-    return t
-
-def _make_wiki_template(topic: str, key_points: List[str]) -> str:
-    bullets = "\n".join(f"- {kp}" for kp in key_points[:6]) if key_points else "- Add concrete principles from your domain."
-    tldr = key_points[0] if key_points else "Summarize the most important value-driven behaviors with examples."
-    return f"""# {topic}
-
-> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
-
-## TL;DR
-- {tldr}
-
-## Key principles & behaviors
-{bullets}
-
-## Examples (fill with concrete evidence)
-- Add one example per behavior. Link to issue/MR/doc where the behavior is demonstrated.
-- Describe outcomes (metrics, customer impact, quality).
-
-## References
-(These notes were derived from internal documents indexed by the agent.)
-"""
-
-def _synthesize_from_points(original_message: str, points: List[str], max_len: int = 800) -> str:
-    if not points:
-        return "No strong evidence found in the current corpus. Try seeding or bootstrapping the handbook."
-    cleaned_q = re.sub(r"\?$", "", (original_message or "").strip())
-    intro = f"**Short answer to:** {cleaned_q}."
-    body = "\n".join(f"- {p}" for p in points[:8])
-    txt = f"{intro}\n\n**Key points from the corpus:**\n{body}"
-    return txt[:max_len].rstrip()
-
 def agent_run(message: str, auto_actions: bool = False) -> Dict:
-    # 1) Rewrite query (make it answerable) — used for retrieval only
-    user_msg = (message or "").strip()
-    query = user_msg
-    if len(query) < 12 or not query.endswith("?"):
-        query = (query.rstrip(".") + "?")
+    # NOTE: Do NOT call st.experimental_rerun or do anything that re-creates tabs here.
+    # Keep everything in-place to avoid "jumping" to other tabs.
 
-    # 2) Retrieve (limit for speed)
+    # 1) Rewrite query (normalize for retrieval)
+    user_msg = (message or "").strip()
+    query = user_msg if (len(user_msg) >= 12 and user_msg.endswith("?")) else (user_msg.rstrip(".") + "?")
+
+    # 2) Retrieve (limit for speed & quality)
     records, pairs, _meta = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
 
-    # 3) Draft with GPT (if available) or extractive fallback
-    answer, _ = generate_answer(records[:8], query, max_chars=750)
-    cleaned = _clean_summary(answer, 750)
-
-    # 4) Extract strong key points (semantic, filtered, deduped)
+    # 3) Extract key points (MMR, clean sentences only)
     emb, _ = get_models()
     points = _extract_key_points(query, pairs, emb, max_points=6)
 
-    if len(cleaned) < 160 or cleaned in {".", ""}:
-        cleaned = _synthesize_from_points(user_msg, points, max_len=750)
+    # 4) Compose short human answer primarily from points (stable extractive baseline)
+    short_answer = _synthesize_from_points(user_msg, points, max_len=750)
 
-    # 5) Wiki draft (deterministic, clean)
+    # 5) (Optional) Refine with GPT only if clearly beneficial (and available)
+    if _openai_available() and len(points) >= 3:
+        # Provide points as strict context to reduce hallucinations
+        ctx = " • ".join(points)
+        try:
+            refined, meta = generate_answer([{"text": ctx, "source": "agent://points"}], f"Write a crisp, practical answer to: {query}", max_chars=750)
+            refined = (refined or "").strip()
+            # Use refined only if it's longer AND looks cleaner (no 'NULL', not just a period)
+            if refined and refined not in {".", "No relevant context found in the current corpus."} and len(refined) >= int(0.6*len(short_answer)):
+                short_answer = refined
+        except Exception:
+            pass
+
+    # 6) Deterministic wiki draft (no GPT, clean template)
     wiki_title = "Guide: " + re.sub(r"\?$", "", query).strip().capitalize()
     wiki_content = _make_wiki_template(wiki_title, points)
 
+    # 7) Apply (optional) + incremental embed
     applied = []
     created_path = None
     if auto_actions:
@@ -677,26 +718,25 @@ def agent_run(message: str, auto_actions: bool = False) -> Dict:
         dst.write_text(wiki_content, encoding="utf-8")
         applied.append({"upserted": f"{slug}.md"})
         created_path = str(dst).replace("\\","/")
-
-        # Incremental embed of the new draft
         prog = Prog("Updating index…")
+        # mark busy but do not rerun; avoid tab jump
         st.session_state["eka_busy"] = True
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
         _ = incremental_add(wiki_content, created_path, progress=prog)
         st.session_state["eka_busy"] = False
         _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-ok'>Online</span></div>", unsafe_allow_html=True)
 
-    # Minimal, human-readable trace
+    # 8) Minimal trace for UX clarity
     trace = [
         {"step": 1, "action": "rewrite_query", "output": query},
         {"step": 2, "action": "retrieve", "used": min(8, len(pairs))},
-        {"step": 3, "action": "draft", "chars": len(cleaned)},
+        {"step": 3, "action": "extract", "points": len(points)},
         {"step": 4, "action": "synthesize_wiki", "title": wiki_title, "len": len(wiki_content)},
-        {"step": 5, "action": "critic", "confidence": 0.78 if len(cleaned) > 260 else 0.58,
-         "notes": ["Tighten examples for specificity.", "Link to issues/MRs/docs where possible."]},
+        {"step": 5, "action": "critic", "confidence": 0.80 if len(points) >= 4 else 0.60,
+         "notes": ["Ensure examples link to issues/MRs/docs.", "Keep examples specific and outcome-focused."]},
     ]
     return {
-        "answer": cleaned,
+        "answer": short_answer,
         "trace": trace,
         "applied_actions": applied,
         "wiki_title": wiki_title,
@@ -713,6 +753,7 @@ with tab_agent:
         if not msg.strip():
             st.warning("Please describe what you want the agent to do.")
         else:
+            # Keep everything in-place (no rerun), so the active tab stays "Agent"
             st.session_state["eka_busy"] = True
             _status_slot.markdown("<div style='display:flex; justify-content:flex-end'><span class='badge badge-warm'>Loading</span></div>", unsafe_allow_html=True)
             res = agent_run(msg, auto_actions=auto)
@@ -727,9 +768,9 @@ with tab_agent:
                 if step["action"] == "rewrite_query":
                     st.write(f"• Rewrote to: `{step.get('output','')}`")
                 elif step["action"] == "retrieve":
-                    st.write(f"• Retrieved and used top {step.get('used',0)} chunks for drafting.")
-                elif step["action"] == "draft":
-                    st.write(f"• Drafted a concise answer ({step.get('chars',0)} chars).")
+                    st.write(f"• Retrieved and used top {step.get('used',0)} chunks.")
+                elif step["action"] == "extract":
+                    st.write(f"• Extracted {step.get('points',0)} key points from evidence.")
                 elif step["action"] == "synthesize_wiki":
                     st.write(f"• Prepared wiki draft: **{step.get('title')}** ({step.get('len')} chars).")
                 elif step["action"] == "critic":
@@ -739,7 +780,6 @@ with tab_agent:
 
             if res.get("applied_actions"):
                 st.success(f"Wiki page created and indexed: {res['applied_actions']}")
-                # Show the created page title + full content for immediate verification
                 with st.expander("Show created wiki page", expanded=True):
                     st.markdown(f"**Title:** {res.get('wiki_title','')}")
                     st.code(res.get("wiki_content",""), language="markdown")
@@ -779,4 +819,4 @@ with tab_about:
 - **Incremental indexing**: uploads append vectors instead of full rebuilds.
 - **Prebuilt index**: drop files into `data/index/prebuilt/` for instant startup.
 """)
-    # (No blue info box here by request)
+    # No blue info box, no extra buttons here

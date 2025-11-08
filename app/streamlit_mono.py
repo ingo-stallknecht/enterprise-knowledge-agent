@@ -4,7 +4,6 @@
 #   1) Create wiki → confirm → embed once, append to index, cache vectors+records per page
 #   2) Delete wiki → confirm → remove cached files, rebuild FAISS from cache (NO re-embedding)
 #   3) Otherwise → answer helpfully (no side effects)
-# About tab now lists all available .md files with size and preview.
 
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
@@ -312,7 +311,7 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
             progress.update(label=f"Embedding {i}/{len(files)} files…",
                             value=0.05 + 0.80*(i/max(1,len(files))))
 
-    X = np.vstack(all_vecs) if all_vecs else np.zeros((0,384), dtype="float32")
+    X = np.vstack(all_vecs) if all_vecs else __import__("numpy").zeros((0,384), dtype="float32")
     save_index(X, all_recs, progress)
     return {"num_files": len(files), "num_chunks": len(all_recs)}
 
@@ -522,12 +521,12 @@ tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "
 # ===== ASK =====
 with tab_ask:
     st.markdown("**Finds relevant passages and answers strictly from them. Shows citations and a sentence-to-source map.**")
-    q = st.text_area("Your question", height=100, placeholder="e.g., How are values applied in performance reviews?")
-    max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
+    q = st.text_area("Your question", height=100, placeholder="e.g., How are values applied in performance reviews?", key="ask_q")
+    max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50, key="ask_len")
     c1, c2 = st.columns(2)
     mode = c1.selectbox("Retrieval mode", ["hybrid","dense","sparse"],
-                        index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE))
-    use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
+                        index=["hybrid","dense","sparse"].index(RETRIEVAL_MODE), key="ask_mode")
+    use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT, key="ask_rr")
 
     if st.button("Get answer", type="primary", key="ask_btn"):
         if not q.strip():
@@ -538,10 +537,10 @@ with tab_ask:
             if len(pairs) == 0:
                 ensure_ready_and_index(True)
                 recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
-            ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
+            ans, llm_meta = generate_answer(recs, q, max_chars=st.session_state["ask_len"])
             if not ans or ans.strip() in {".", ""}:
                 joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
-                ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
+                ans = joined[:st.session_state["ask_len"]] if joined else "No relevant context found in the current corpus."
             st.subheader("Answer"); st.write(ans)
             m1, m2, m3, m4 = st.columns(4)
             m1.markdown(f"<div class='kpi'>Sources: <b>{len(pairs[:TOP_K])}</b></div>", unsafe_allow_html=True)
@@ -565,14 +564,15 @@ with tab_ask:
                     st.write(c['preview'])
 
 # ===== AGENT =====
+# Session state
 if "agent_state" not in st.session_state:
     st.session_state["agent_state"] = {
         "mode": "idle",            # idle | create_proposed | delete_proposed
         "proposed_title": "",
         "proposed_content": "",
         "delete_candidates": [],
-        "last_result": None
     }
+state = st.session_state["agent_state"]
 
 CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
 DELETE_PAT = re.compile(r"\b(delete|remove|trash|erase|drop)\b\s+(.+)", re.I)
@@ -667,7 +667,7 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     created_path = str(dst).replace("\\","/")
     prog = Prog("Updating index…")
     res = incremental_add(content, created_path, progress=prog)
-    return {"file": f"{slug}.md", "path": created_path, "added": res}
+    return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
 
 def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     # Physically delete files
@@ -684,8 +684,8 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     _ = remove_cache_for_sources(deleted_paths)
     # Rebuild FAISS from cache only (no re-embedding)
     prog = Prog("Refreshing index from cache…")
-    stats = rebuild_from_cache(prog)
-    return {"deleted": deleted_paths, "reindexed": stats}
+    _ = rebuild_from_cache(prog)
+    return {"deleted": deleted_paths}
 
 # --- Agent UI ---
 with tab_agent:
@@ -696,125 +696,95 @@ with tab_agent:
              "3) Otherwise, it will **answer helpfully** without side effects.\n"
              "Nothing happens without your approval.")
 
-    if "agent_state" not in st.session_state:
-        st.session_state["agent_state"] = {
-            "mode": "idle", "proposed_title": "", "proposed_content": "",
-            "delete_candidates": [], "last_result": None
-        }
-    state = st.session_state["agent_state"]
+    # --- Idle/Input ---
+    msg = st.text_area(
+        "Goal or task",
+        height=110,
+        placeholder='e.g., create a wiki page "Values in Performance Reviews" · delete values.md · or just ask a question',
+        key="agent_msg",
+    )
 
-    # Persistent confirmation banners
-    if state["last_result"]:
-        r = state["last_result"]
-        if r.get("action") == "create":
-            st.success(f"Created and indexed: **{r['title']}**  → `{r['file']}`")
-            st.caption(r.get("path", ""))
-            with st.expander("Index details"):
-                st.json(r.get("details", {}))
-        elif r.get("action") == "delete":
-            st.success(f"Deleted **{len(r.get('deleted', []))}** file(s) and refreshed index from cache.")
-            if r.get("deleted"):
-                st.code("\n".join(r["deleted"]), language="text")
-            with st.expander("Index details"):
-                st.json(r.get("details", {}))
+    # These containers allow us to render confirmation UIs immediately on first click
+    create_container = st.container()
+    delete_container = st.container()
+    answer_container = st.container()
 
-    # Confirmation flows
-    if state["mode"] == "create_proposed":
-        st.subheader("Create wiki — confirmation required")
-        title_val = st.text_input("Title", value=state["proposed_title"], key="agent_create_title")
-        st.code(state["proposed_content"], language="markdown")
-        c1, c2 = st.columns(2)
-        if c1.button("Confirm create page", key="agent_confirm_create"):
-            res = agent_apply_create_wiki(title_val.strip() or state["proposed_title"], state["proposed_content"])
-            st.success(f"Created and indexed: **{title_val.strip() or state['proposed_title']}**  → `{res['file']}`")
-            st.caption(res.get("path", ""))
-            with st.expander("Index details"): st.json(res)
-            st.session_state["agent_state"] = {
-                "mode":"idle","proposed_title":"","proposed_content":"",
-                "delete_candidates":[],
-                "last_result": {
-                    "action":"create",
-                    "title": title_val.strip() or state["proposed_title"],
-                    "file": res.get("file",""),
-                    "path": res.get("path",""),
-                    "details": res
-                }
-            }
-        if c2.button("Cancel", key="agent_cancel_create"):
-            st.session_state["agent_state"]["mode"] = "idle"
-
-    elif state["mode"] == "delete_proposed":
-        st.subheader("Delete wiki — confirmation required")
-        if not state["delete_candidates"]:
-            st.info("No matching wiki files found.")
-            if st.button("Close", key="agent_close_delete_empty"):
-                st.session_state["agent_state"]["mode"] = "idle"
+    if st.button("Run", type="primary", key="agent_run_btn"):
+        text = (msg or "").strip()
+        if not text:
+            st.warning("Please describe what you want the agent to do.")
         else:
-            sel = st.multiselect("Select files to delete", options=state["delete_candidates"],
-                                 default=state["delete_candidates"][:1], key="agent_delete_sel")
-            d1, d2 = st.columns(2)
-            if d1.button("Confirm delete selected", key="agent_confirm_delete"):
-                res = agent_apply_delete_wiki(sel)
-                st.success(f"Deleted **{len(res.get('deleted', []))}** file(s) and refreshed index from cache.")
-                if res.get("deleted"): st.code("\n".join(res["deleted"]), language="text")
-                with st.expander("Index details"): st.json(res)
-                st.session_state["agent_state"] = {
-                    "mode":"idle","proposed_title":"","proposed_content":"",
-                    "delete_candidates":[],
-                    "last_result": {"action":"delete","deleted": res.get("deleted", []),"details": res}
-                }
-            if d2.button("Cancel", key="agent_cancel_delete"):
-                st.session_state["agent_state"]["mode"] = "idle"
+            intent, info = classify_intent(text)
+            if intent == "create_wiki":
+                # Build proposal immediately and render confirmation now (no second click needed)
+                query = text if text.endswith("?") else (text.rstrip(".") + "?")
+                recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+                emb, _ = get_models()
+                points = extract_key_points(query, pairs, emb, max_points=5)
+                title = concise_title(info.get("title") or "Untitled")
+                content = render_wiki_md(title, points)
+                # Store for safety (also shown now)
+                state.update({"mode": "create_proposed", "proposed_title": title, "proposed_content": content})
 
-    else:
-        # Idle: classify and act
-        msg = st.text_area("Goal or task", height=110,
-                           placeholder='e.g., create a wiki page "Values in Performance Reviews" · delete values.md · or just ask a question',
-                           key="agent_msg")
-        if st.button("Run", type="primary", key="agent_run_btn"):
-            text = (msg or "").strip()
-            if not text:
-                st.warning("Please describe what you want the agent to do.")
+                with create_container:
+                    st.subheader("Create wiki — confirmation required")
+                    title_val = st.text_input("Title", value=title, key="agent_create_title_live")
+                    st.code(content, language="markdown")
+                    col1, col2 = st.columns(2)
+                    if col1.button("Confirm create page", key="agent_confirm_create_live"):
+                        res = agent_apply_create_wiki(title_val.strip() or title, content)
+                        st.success(f"Created and indexed: **{title_val.strip() or title}**  → `{res['file']}`")
+                        st.caption(res.get("path", ""))
+                        # reset state
+                        state.update({"mode":"idle","proposed_title":"","proposed_content":""})
+
+                    if col2.button("Cancel", key="agent_cancel_create_live"):
+                        state.update({"mode":"idle","proposed_title":"","proposed_content":""})
+                        st.info("Creation canceled.")
+
+            elif intent == "delete_wiki":
+                q = (info.get("query") or "").lower()
+                cands = []
+                for p in WIKI_DIR.glob("*.md"):
+                    if q in p.stem.lower() or q in p.name.lower():
+                        cands.append(str(p).replace("\\","/"))
+                state.update({"mode": "delete_proposed", "delete_candidates": cands})
+
+                with delete_container:
+                    st.subheader("Delete wiki — confirmation required")
+                    if not cands:
+                        st.info("No matching wiki files found.")
+                    else:
+                        sel = st.multiselect(
+                            "Select files to delete",
+                            options=cands,
+                            default=cands[:1],
+                            key="agent_delete_sel_live"
+                        )
+                        d1, d2 = st.columns(2)
+                        if d1.button("Confirm delete selected", key="agent_confirm_delete_live"):
+                            res = agent_apply_delete_wiki(sel)
+                            st.success(f"Deleted **{len(res.get('deleted', []))}** file(s).")
+                            if res.get("deleted"):
+                                st.code("\n".join(res["deleted"]), language="text")
+                            state.update({"mode":"idle","delete_candidates":[]})
+
+                        if d2.button("Cancel", key="agent_cancel_delete_live"):
+                            state.update({"mode":"idle","delete_candidates":[]})
+                            st.info("Deletion canceled.")
+
             else:
-                intent, info = classify_intent(text)
-                if intent == "create_wiki":
-                    # propose title & content using current context
-                    query = text if text.endswith("?") else (text.rstrip(".") + "?")
-                    recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
-                    emb, _ = get_models()
-                    points = extract_key_points(query, pairs, emb, max_points=5)
-                    title = concise_title(info.get("title") or "Untitled")
-                    content = render_wiki_md(title, points)
-                    st.session_state["agent_state"].update({
-                        "mode": "create_proposed",
-                        "proposed_title": title,
-                        "proposed_content": content,
-                        "last_result": None
-                    })
-
-                elif intent == "delete_wiki":
-                    q = (info.get("query") or "").lower()
-                    cands = []
-                    for p in WIKI_DIR.glob("*.md"):
-                        if q in p.stem.lower() or q in p.name.lower():
-                            cands.append(str(p).replace("\\","/"))
-                    st.session_state["agent_state"].update({
-                        "mode": "delete_proposed",
-                        "delete_candidates": cands,
-                        "last_result": None
-                    })
-
-                else:
-                    # Helpful answer
-                    ensure_ready_and_index(False)
+                # Helpful answer now
+                ensure_ready_and_index(False)
+                recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                if len(pairs) == 0:
+                    ensure_ready_and_index(True)
                     recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
-                    if len(pairs) == 0:
-                        ensure_ready_and_index(True)
-                        recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
-                    ans, llm_meta = generate_answer(recs, text, max_chars=900)
-                    if not ans or ans.strip() in {".", ""}:
-                        joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
-                        ans = joined[:900] if joined else "No relevant context found in the current corpus."
+                ans, llm_meta = generate_answer(recs, text, max_chars=900)
+                if not ans or ans.strip() in {".", ""}:
+                    joined = "\n\n".join((r.get("text") or "") for r,_ in pairs[:6]).strip()
+                    ans = joined[:900] if joined else "No relevant context found in the current corpus."
+                with answer_container:
                     st.subheader("Agent answer"); st.write(ans)
                     st.markdown("#### Sources")
                     for c in fmt_citations(pairs, k=min(6, len(pairs))):

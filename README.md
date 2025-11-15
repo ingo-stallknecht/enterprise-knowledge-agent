@@ -92,11 +92,10 @@ Tracks retrieval metrics, index versions, evaluation results, and promotion/roll
 
 **Promotion logic:**
 ```txt
-If candidate meets evaluation thresholds AND
-   candidate >= current_production:
-       promote candidate to production
+If candidate >= current_production:
+    promote candidate to production
 Else:
-       keep current production as is (do nothing)
+    keep current production as is (do nothing)
 ```
 	
 <ADD SCREENSHOT OF MLFLOW UI HERE>

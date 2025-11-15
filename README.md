@@ -26,7 +26,7 @@ The system uses the structure and writing style of the publicly available [GitLa
 ---
 
 ## UI Preview  
-`<ADD SCREENSHOT OF MAIN UI HERE>`  
+![UI Overview](assets/ui.png) 
 
 ---
 
@@ -38,7 +38,7 @@ The system uses the structure and writing style of the publicly available [GitLa
 - Answers via GPT-4o (if available) or extractive fallback  
 - Includes sentence-to-source attribution and expandable citation previews  
 
-`<ADD SCREENSHOT OF ASK TAB HERE>`
+![Ask Tab](assets/ask_tab.png)
 
 ---
 
@@ -58,7 +58,7 @@ Safeguards:
 - Harmful content and unsafe titles are blocked  
 - Index updates incrementally  
 
-`<ADD SCREENSHOT OF WIKI CREATION HERE>`
+![Agent Tab](assets/agent_tab.png)
 
 ---
 
@@ -98,7 +98,7 @@ Else:
     keep current production as is (do nothing)
 ```
 	
-<ADD SCREENSHOT OF MLFLOW UI HERE>
+![MLFlow](assets/mlflow.png)
 
 ## Airflow Weekly Pipeline (Optional, Local)
 
@@ -108,8 +108,6 @@ The DAG `airflow/dags/weekly_ingest_and_train.py` automates:
 - Rebuilding the index  
 - Evaluating retrieval quality  
 - Promoting or rolling back based on metrics  
-
-`<ADD SCREENSHOT OF AIRFLOW DAG HERE>`
 
 ---
 

@@ -1,0 +1,93 @@
+[33mcba85a3[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m HEAD@{0}: commit: Update README
+[33mf715929[m HEAD@{1}: reset: moving to HEAD~1
+[33mdb5f7ca[m[33m ([m[1;31morigin/main[m[33m)[m HEAD@{2}: reset: moving to HEAD~1
+[33m7c62964[m HEAD@{3}: commit: Update Streamlit
+[33mdb5f7ca[m[33m ([m[1;31morigin/main[m[33m)[m HEAD@{4}: commit: Update README
+[33mf715929[m HEAD@{5}: commit: Make YAML config optional and robust on Streamlit Cloud
+[33mbedcbee[m HEAD@{6}: commit: Update requirements
+[33m5a6e0e1[m HEAD@{7}: commit: Update start_mlflow.sh
+[33m4e93deb[m HEAD@{8}: commit: Add CONTRIBUTING
+[33mf8e38a6[m HEAD@{9}: commit: Update README
+[33mdc79f2d[m HEAD@{10}: commit: Update Streamlit App
+[33m7bb5d5d[m HEAD@{11}: commit: Update README
+[33m1464c8f[m HEAD@{12}: commit: Update README
+[33m2abb493[m HEAD@{13}: commit: Update README
+[33m65e2565[m HEAD@{14}: commit: Clean runtime vs dev requirements (add Airflow + MLflow to dev only)
+[33mcf37278[m HEAD@{15}: commit: Clean runtime vs dev requirements (add Airflow + MLflow to dev only)
+[33m34ee808[m HEAD@{16}: commit: Clean runtime vs dev requirements (add Airflow + MLflow to dev only)
+[33m64891e0[m HEAD@{17}: commit: Update README
+[33me10b9c1[m HEAD@{18}: commit: Update README
+[33mb0912cf[m HEAD@{19}: commit: Update README
+[33m460e3e0[m HEAD@{20}: commit: Update README
+[33mba2216b[m HEAD@{21}: commit: Update README
+[33mff2bbc8[m HEAD@{22}: commit: Update README
+[33m5826f75[m HEAD@{23}: commit: Update README
+[33m5657e6f[m HEAD@{24}: commit: Update Airflow DAG, MLflow setup, Dockerfile, and README refinements
+[33ma2108a8[m HEAD@{25}: commit: Normalize line endings
+[33m642c1d9[m HEAD@{26}: commit: Add requirements-dev.txt and update project setup
+[33m3b423ba[m HEAD@{27}: commit: Update gitignoe
+[33m912ea68[m HEAD@{28}: commit: Remove MLflow experiment folders and ignore them
+[33m6d8c2d4[m HEAD@{29}: pull --rebase origin main (finish): returning to refs/heads/main
+[33m6d8c2d4[m HEAD@{30}: pull --rebase origin main (pick): Update README.md
+[33macbd193[m HEAD@{31}: pull --rebase origin main (start): checkout acbd1932c9c21310a6fd4690a6fe78fa42fd5a91
+[33mba79b65[m HEAD@{32}: commit: Update README.md
+[33me4d4f5c[m HEAD@{33}: commit: Replace streamlit_mono with streamlit_app and remove local-only files
+[33m5ea7410[m HEAD@{34}: commit: Update Streamlit UI
+[33m3a658ac[m HEAD@{35}: commit: feat: allow editing wiki documents in Streamlit app
+[33m75cad47[m HEAD@{36}: commit: feat: allow editing wiki documents in Streamlit app
+[33ma6ce5ab[m HEAD@{37}: commit: Update README
+[33m347474a[m HEAD@{38}: commit: Update README
+[33m98a1233[m HEAD@{39}: commit: Update README
+[33m15922a1[m HEAD@{40}: commit: Update README
+[33m7529244[m HEAD@{41}: commit: Update README
+[33m9e946bc[m HEAD@{42}: commit: Update Steamlit UI
+[33m1eef1e8[m HEAD@{43}: commit: Update Steamlit UI
+[33mb09bd6d[m HEAD@{44}: commit: Update Steamlit UI
+[33m39bc56e[m HEAD@{45}: commit: Update Steamlit UI
+[33m0c74862[m HEAD@{46}: commit: Update Steamlit UI
+[33mc1f4034[m HEAD@{47}: commit: Update Steamlit UI
+[33mce01b0c[m HEAD@{48}: commit: Update Streamlit UI
+[33md9f8711[m HEAD@{49}: commit: Update Streamlit UI
+[33m157cd74[m HEAD@{50}: commit: Update Streamlit UI
+[33m662e70b[m HEAD@{51}: commit: Update Streamlit UI
+[33m8624e3d[m HEAD@{52}: commit: Update Streamlit UI
+[33m96b63c0[m HEAD@{53}: commit: Update Streamlit UI
+[33m694315f[m HEAD@{54}: commit: Update Streamlit UI
+[33mc1466cf[m HEAD@{55}: commit: Update Streamlit UI
+[33m08ffd65[m HEAD@{56}: commit: Update Streamlit UI
+[33md58ffd1[m HEAD@{57}: commit: Update Streamlit UI
+[33m7758677[m HEAD@{58}: commit: Update Streamlit UI
+[33ma16e368[m HEAD@{59}: commit: Update Streamlit UI
+[33mbff8d7b[m HEAD@{60}: commit: Update Streamlit UI
+[33mcfb3245[m HEAD@{61}: commit: Update Streamlit UI
+[33m5d5ab7a[m HEAD@{62}: commit: Update Streamlit UI
+[33m5370571[m HEAD@{63}: commit: Update Streamlit UI
+[33m837b5d5[m HEAD@{64}: commit: Update Streamlit UI
+[33m463cd05[m HEAD@{65}: commit: Update Streamlit UI
+[33ma7eabfc[m HEAD@{66}: commit: New Streamlit UI
+[33mc19f657[m HEAD@{67}: commit: New Streamlit UI
+[33ma29246a[m HEAD@{68}: commit: feat: Streamlit-only EKA + robust GPT fallback, seed corpus, safe HF cache
+[33m48a82c1[m HEAD@{69}: commit: feat: Streamlit-only EKA + robust GPT fallback, seed corpus, safe HF cache
+[33mafe7448[m HEAD@{70}: commit: Update: bootstrap GitLab corpus + ensure_dirs in utils.py
+[33mf7e6412[m HEAD@{71}: commit: Update: bootstrap GitLab corpus + ensure_dirs in utils.py
+[33m2b19ae4[m HEAD@{72}: commit: Fix: reranker.py SyntaxError and safe CrossEncoder init
+[33m11078ef[m HEAD@{73}: commit: Fix Streamlit Cloud PermissionError: disable HF token search; force cache dir; pass cache to SentenceTransformer/CrossEncoder
+[33m21d49e0[m HEAD@{74}: commit: Fix Streamlit Cloud PermissionError: disable HF token search; force cache dir; pass cache to SentenceTransformer/CrossEncoder
+[33m39f6d9c[m HEAD@{75}: commit: Fix Streamlit Cloud PermissionError: disable HF token search; force cache dir; pass cache to SentenceTransformer/CrossEncoder
+[33m57d1f1a[m HEAD@{76}: commit: Streamlit Cloud: harden HF cache/token sandbox (override HOME, create all token locations); add Agent tab
+[33m5b88018[m HEAD@{77}: commit: remove leaked env files
+[33m3590748[m HEAD@{78}: commit: Streamlit Cloud: fully fixed writable cache setup using /mount/tmp
+[33m4c6d9c6[m HEAD@{79}: commit: Update README
+[33me59a7c5[m HEAD@{80}: commit: Streamlit Cloud: fix HF PermissionError (writable cache + empty token), add Agent tab with wiki upsert & reindex
+[33m9d0a168[m HEAD@{81}: commit: Fix HF permission error and finalize Streamlit-only mono app
+[33m2f3e281[m HEAD@{82}: commit: Add Streamlit-only mono app for direct deployment; package __init__.py fixes; split requirements for local and cloud
+[33m426cde5[m HEAD@{83}: commit: Split deps: minimal requirements.txt for Streamlit; requirements-local.txt for full local tooling (+ optional requirements-api.txt)
+[33mbb096c0[m HEAD@{84}: commit: Fix typo: _SENT_SPLIT variable name in streamlit_mono.py
+[33m6296438[m HEAD@{85}: commit: Add Streamlit-only mono app: direct GitHub → Streamlit Cloud deploy using secrets for OpenAI key
+[33mb3c57ed[m HEAD@{86}: commit: Updated secrets.toml
+[33mfb7d17a[m HEAD@{87}: commit: Streamlit Cloud-ready UI: secrets support, CORS on backend, and README badge linking to hosted app
+[33m527e7ac[m HEAD@{88}: commit: Fix MLflow integration: unified tracking URI across scripts and UI, added safety checks and logging
+[33m08fff82[m HEAD@{89}: commit: Add MIT License
+[33m6014a42[m HEAD@{90}: commit: UI polish + Agent readability improvements + stable index progress
+[33mde07257[m HEAD@{91}: commit: Implemented initial working version of Enterprise Knowledge Agent (basic GPT integration, config updates, minimal UI)
+[33m924963f[m HEAD@{92}: commit (initial): feat: add full Enterprise Knowledge Agent project

@@ -23,7 +23,7 @@ COPY . .
 # Expose Streamlit default port
 EXPOSE 8501
 
-# Streamlit config via env (optional, but handy)
+# Streamlit config via env
 ENV EKA_BOOTSTRAP=false
 ENV EKA_DISABLE_RERANKER=true
 ENV EKA_USE_RERANKER=false

@@ -105,7 +105,7 @@ def _openai_diag() -> str:
     if use and key:
         return f"OpenAI: ON (key ✓, model {model})"
     if use and not key:
-        return "OpenAI: ON (key missing ⚠)"
+        return "OpenAI: ON (key missing)"
     return "OpenAI: OFF"
 
 # ---------- Settings ----------
@@ -158,7 +158,7 @@ for p in (VEC_DIR, RECS_DIR, MANIFEST.parent):
     p.mkdir(parents=True, exist_ok=True)
 
 # ---------- CSS / UI ----------
-st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="✨", layout="wide")
+st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="EKA", layout="wide")
 st.markdown(
     """
 <style>
@@ -514,18 +514,20 @@ st.markdown(
     """
 > **How to use this app**
 >
-> - **Ask** – Ask natural-language questions. The app searches a GitLab-inspired handbook plus your wiki pages  
->   and answers *strictly* from those documents with citations and a context visualizer.
-> - **Agent** – Describe a task. The agent can  
->   1) propose & create wiki pages,  
->   2) delete pages (only inside `data/processed/wiki/`),  
->   3) edit existing wiki pages, or  
->   4) just answer normally with no side effects.  
->   All create/delete/edit actions require your confirmation.
-> - **Upload** – Add your own `.md` / `.txt` files; they become part of the knowledge base and show up in answers.
-> - **About** – See an overview of how the system works and browse the Markdown documents that are currently indexed.
+> - **Ask** - Ask natural-language questions. The app searches a GitLab-inspired handbook plus your wiki pages  
+>   and answers strictly from those documents with citations and a context visualizer.
+> - **Agent** - Describe a task. The agent can  
+>   1) propose and create wiki pages  
+>   2) delete pages (only inside `data/processed/wiki/`)  
+>   3) edit existing wiki pages  
+>   4) answer normally with no side effects  
 >
-> The initial corpus is based on a small subset of the public **GitLab Handbook**  
+> **All create/delete/edit actions require your confirmation.**
+>
+> - **Upload** - Add your own `.md` / `.txt` files; they become part of the knowledge base and show up in answers.
+> - **About** - See an overview of how the system works and browse the Markdown documents that are currently indexed.
+>
+> The initial corpus is based on a small subset of the public GitLab Handbook  
 > (<https://about.gitlab.com/handbook/>), plus any wiki pages and uploads you add here.
 """
 )
@@ -604,7 +606,7 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
         if AUTO_BOOTSTRAP and not have_any_markdown():
-            st.info("Fetching a small subset of the GitLab Handbook…", icon="ℹ️")
+            st.info("Fetching a small subset of the GitLab Handbook…")
             res = bootstrap_gitlab(Prog("Bootstrapping…"))
             if not res.get("ok"):
                 write_seed_corpus()
@@ -622,7 +624,7 @@ with tab_ask:
     q = st.text_area(
         "Your question",
         height=100,
-        placeholder="e.g., How are values applied in performance reviews?",
+        placeholder="For example: How are values applied in performance reviews?",
     )
     max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
     c1, c2 = st.columns(2)
@@ -762,9 +764,10 @@ def concise_title(title: str) -> str:
             return w.lower()
         return w.capitalize()
 
-    parts = re.split(r"(\s+|\—)", t)
-    t = "".join(_tc_word(w) if not w.isspace() and w != "—" else w for w in parts)
-    t = re.sub(r"\s*—\s*", " — ", t)
+    # Avoid em dash; treat hyphen as separator
+    parts = re.split(r"(\s+|\-)", t)
+    t = "".join(_tc_word(w) if not w.isspace() and w != "-" else w for w in parts)
+    t = re.sub(r"\s*-\s*", " - ", t)
     return t
 
 # ---------- Safety filters ----------
@@ -796,7 +799,7 @@ def render_wiki_md_template(title: str, key_points: List[str]) -> str:
     )
     return f"""# {title}
 
-> Internal guide – drafted by the Knowledge Agent. Please review before publishing.
+> Internal guide drafted by the Knowledge Agent. Please review before publishing.
 
 ## TL;DR
 - {tldr}
@@ -805,14 +808,14 @@ def render_wiki_md_template(title: str, key_points: List[str]) -> str:
 {bullets}
 
 ## Examples
-- Add one example per behavior. Link to issue/MR/doc where demonstrated.
+- Add one example per behavior. Link to issue, merge request, or document where this was demonstrated.
 - Describe outcomes (metrics, customer impact, quality).
 
 ## Checklist
 - Document decisions and feedback in writing.
 - Time-box feedback windows and collect input before the decision deadline.
 - Tie observations to values and measurable outcomes.
-- Link to evidence (issues/MRs/docs).
+- Link to evidence (issues, merge requests, documents).
 
 ## References
 (Synthesized from indexed documents.)
@@ -869,17 +872,17 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
     bullets = "\n".join(f"- {p}" for p in key_points) if key_points else ""
     system = (
         "You are a helpful documentation writer for an internal engineering handbook. "
-        "You produce clean, concise, safe Markdown pages with:\n"
-        "H1 title, TL;DR, Key behaviors (bulleted), Examples, Checklist, References.\n"
-        "The page MUST be safe: no hate, sexual content, self-harm, or instructions for violence/illicit acts.\n"
-        "No filler. Keep it practical. No 'via GPT' mentions."
+        "You produce clean, concise, safe Markdown pages with: "
+        "H1 title, TL;DR, Key behaviors (bulleted), Examples, Checklist, References. "
+        "The page must be safe: no hate, sexual content, self-harm, or instructions for violence or illicit acts. "
+        "No filler. Keep it practical. Do not mention that this was written by a model."
     )
     user = (
         f"Write a wiki page titled: '{preferred_title}'.\n\n"
         f"User request/context: {query}\n\n"
         f"Key points to incorporate (if relevant):\n{bullets}\n\n"
         "Ensure feedback is time-boxed and collected before deadlines.\n"
-        "Return ONLY the Markdown content of the page."
+        "Return only the Markdown content of the page."
     )
     try:
         resp = client.chat.completions.create(
@@ -966,13 +969,13 @@ def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
 with tab_agent:
     st.markdown("**Agent**")
     st.write(
-        "The agent can: (1) propose & create wiki pages, (2) delete pages (wiki folder only), "
+        "The agent can (1) propose and create wiki pages, (2) delete pages (wiki folder only), "
         "(3) edit wiki pages, or (4) answer normally. "
-        "Create/delete/edit always require your confirmation. New pages are drafted with GPT-4 when available."
+        "Create, delete, and edit actions always require your confirmation."
     )
 
     if READ_ONLY:
-        st.info("Read-only mode is ON. Creating, deleting, and editing pages is disabled.", icon="ℹ️")
+        st.info("Read-only mode is ON. Creating, deleting, and editing pages is disabled.")
 
     agent_result = st.container()
     state = st.session_state["agent_state"]
@@ -1126,7 +1129,7 @@ with tab_agent:
 
     # CREATE confirmation
     if state["mode"] == "create_proposed":
-        st.subheader("Create wiki – confirmation required")
+        st.subheader("Create wiki - confirmation required")
         with st.form("agent_create_confirm", clear_on_submit=False):
             title_val = st.text_input(
                 "Title",
@@ -1151,7 +1154,7 @@ with tab_agent:
                     title_val.strip() or state["proposed_title"],
                     state["proposed_content"],
                 )
-                st.success(f"Created and indexed: **{res['file']}**")
+                st.success(f"Created and indexed: {res['file']}")
                 if res.get("path"):
                     st.caption(res["path"])
                 st.session_state["agent_state"] = {
@@ -1171,7 +1174,7 @@ with tab_agent:
 
     # DELETE confirmation
     if state["mode"] == "delete_proposed":
-        st.subheader("Delete wiki – confirmation required (wiki folder only)")
+        st.subheader("Delete wiki - confirmation required (wiki folder only)")
         if not state["delete_candidates"]:
             with st.form("agent_delete_close"):
                 close_btn = st.form_submit_button("Close")
@@ -1195,7 +1198,7 @@ with tab_agent:
                     st.error("Delete denied: read-only mode is enabled.")
                 else:
                     res = agent_apply_delete_wiki(sel)
-                    st.success(f"Deleted **{res['num_deleted']}** file(s).")
+                    st.success(f"Deleted {res['num_deleted']} file(s).")
                     if res.get("deleted"):
                         st.code("\n".join(res["deleted"]), language="text")
                     st.session_state["agent_state"] = {
@@ -1215,7 +1218,7 @@ with tab_agent:
 
     # EDIT confirmation
     if state["mode"] == "edit_proposed":
-        st.subheader("Edit wiki – confirmation required (wiki folder only)")
+        st.subheader("Edit wiki - confirmation required (wiki folder only)")
         if not state["edit_candidates"]:
             with st.form("agent_edit_close"):
                 close_btn = st.form_submit_button("Close")
@@ -1289,7 +1292,7 @@ with tab_upload:
     )
     f = st.file_uploader("Upload a file", type=["md", "txt"])
     ttl = st.text_input("Optional page title")
-    if st.button("Upload & update knowledge", key="upload_btn"):
+    if st.button("Upload and update knowledge", key="upload_btn"):
         if not f:
             st.warning("Please select a file first.")
         else:
@@ -1346,17 +1349,17 @@ with tab_about:
     st.markdown("### How this works")
     st.markdown(
         """
-- **Hybrid retrieval** with optional reranker.
-- **Q&A** answers strictly from retrieved passages with citations.
-- **Agent:** can create, delete, and edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer.
-- **Vector cache:** deletes and edits never re-embed all files; index is rebuilt from cached vectors.
-- **Prebuilt index:** drop files into `data/index/prebuilt/` to skip first-run builds.
-- **Safety:** harmful titles/content are blocked; deletes/edits are restricted to the wiki folder.
-- **Documents view:** below you can inspect the Markdown files that are currently part of the corpus.
+- Hybrid retrieval with optional reranker.
+- Question answering strictly from retrieved passages with citations.
+- Agent can create, delete, and edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer.
+- Vector cache so deletes and edits do not re-embed all files; the index is rebuilt from cached vectors.
+- Prebuilt index support via `data/index/prebuilt/` for faster cold starts.
+- Safety filter on titles and content; destructive actions are restricted to the wiki folder.
+- Documents view below where you can inspect the Markdown files that are currently part of the corpus.
 """
     )
     stats_now = corpus_stats()
-    st.info(f"Corpus stats: {stats_now['files']} files · ~{stats_now['size_kb']} KB")
+    st.info(f"Corpus stats: {stats_now['files']} files, approximately {stats_now['size_kb']} KB")
 
     st.markdown("#### Current Markdown files")
     md_list = _list_md_files()
@@ -1364,11 +1367,11 @@ with tab_about:
         st.write("No Markdown files found yet.")
     else:
         for item in md_list:
-            header = f"{item['name']}  ·  ~{item['kb']} KB  ·  {item['path']}"
+            header = f"{item['name']}  ·  approximately {item['kb']} KB  ·  {item['path']}"
             with st.expander(header, expanded=False):
                 if item.get("preview"):
                     st.code(item["preview"], language="markdown")
                     if item.get("truncated"):
-                        st.caption("Preview truncated – file is longer in full.")
+                        st.caption("Preview truncated. The file is longer in full.")
                 else:
                     st.write("(empty)")

@@ -16,6 +16,9 @@ mlflow_artifacts/
 
 # Airflow
 airflow/logs/
+airflow/airflow.db
+airflow/*.pid
+airflow/tmp/
 *.pid
 
 # OS cruft

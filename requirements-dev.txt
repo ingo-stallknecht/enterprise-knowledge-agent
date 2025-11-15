@@ -14,3 +14,9 @@ flake8
 
 # Optional: test coverage
 coverage
+
+# Optional: Airflow for local ingestion / training pipeline
+# Airflow is intentionally NOT in requirements.txt because it is heavy (SQLAlchemy, Celery, Gunicorn, etc.)
+# Developers who want the weekly pipeline can install it via:
+#     pip install -r requirements-dev.txt
+apache-airflow==2.9.0

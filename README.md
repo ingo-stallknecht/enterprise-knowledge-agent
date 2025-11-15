@@ -91,7 +91,8 @@ Tracks retrieval metrics, index versions, evaluation results, and promotion/roll
 If new index improves metrics:
     promote as production
 Else:
-    rollback to previous version```
+    rollback to previous version
+```
 	
 <ADD SCREENSHOT OF MLFLOW UI HERE>
 
@@ -114,11 +115,13 @@ The DAG `airflow/dags/weekly_ingest_and_train.py` automates:
 git clone https://github.com/ingo-stallknecht/enterprise-knowledge-agent.git
 cd enterprise-knowledge-agent
 pip install -r requirements.txt
-streamlit run app/streamlit_app.py```
+streamlit run app/streamlit_app.py
+```
 
 ## Optional (development tools)
 
 ```bash
 pip install -r requirements-dev.txt
 bash mlflow/start_mlflow.sh
-docker-compose -f docker-compose-airflow.yml up```
+docker-compose -f docker-compose-airflow.yml up
+```

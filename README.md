@@ -21,8 +21,7 @@ The system runs:
 
 ### Corpus Source
 
-The system uses the structure and writing style of the publicly available  
-[GitLab Handbook](https://about.gitlab.com/handbook/) as an inspiration and example of large-scale organizational documentation.
+The system uses the structure and writing style of the publicly available [GitLab Handbook](https://about.gitlab.com/handbook/) as an inspiration and example of large-scale organizational documentation.
 
 ---
 

@@ -1,30 +1,46 @@
 # app/rag/utils.py
-import json, pathlib, yaml
+
+import json
+import pathlib
+
+try:
+    import yaml  # optional dependency
+except ModuleNotFoundError:
+    yaml = None
+
 
 def ensure_dirs():
-    for p in [
-        "data/raw",
-        "data/processed",
-        "data/processed/wiki",
-        "data/index",
-        "data/eval",
-        "data/billing",
-    ]:
-        pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+    """Ensure required data folders exist."""
+    for d in ["data/raw", "data/processed/wiki", "data/index", "data/billing"]:
+        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+
 
 def load_cfg(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """
+    Load configuration from a YAML file if available.
 
-def get_production_index_paths(model_name: str):
+    - If the file does not exist → return {}.
+    - If PyYAML is missing → try JSON as a fallback, else return {}.
+    - If YAML is available → use yaml.safe_load and return {} on failure.
     """
-    Local pointer written into data/index/production_paths.json
-    Returns {"index_path": "...", "store_path": "..."} or {}.
-    """
-    ptr = pathlib.Path("data/index/production_paths.json")
-    if ptr.exists():
+    p = pathlib.Path(path)
+    if not p.exists():
+        return {}
+
+    text = p.read_text(encoding="utf-8")
+
+    # If yaml is not available, try JSON as a graceful fallback
+    if yaml is None:
         try:
-            return json.loads(ptr.read_text(encoding="utf-8"))
+            return json.loads(text)
         except Exception:
+            # No YAML and not valid JSON → just use defaults
             return {}
-    return {}
+
+    # Normal path: use YAML
+    try:
+        cfg = yaml.safe_load(text)
+        return cfg or {}
+    except Exception:
+        # If config is malformed, do not crash the app; just use defaults
+        return {}

@@ -1,7 +1,7 @@
 # requirements-dev.txt
 # Development dependencies (not required for running the Streamlit app)
 
-# Load all runtime dependencies
+# Pull in all runtime dependencies
 -r requirements.txt
 
 # Testing
@@ -16,7 +16,8 @@ flake8
 coverage
 
 # Optional: Airflow for local ingestion / training pipeline
-# Airflow is intentionally NOT in requirements.txt because it is heavy (SQLAlchemy, Celery, Gunicorn, etc.)
-# Developers who want the weekly pipeline can install it via:
-#     pip install -r requirements-dev.txt
+# This is heavy and intentionally NOT in requirements.txt.
 apache-airflow==2.9.0
+
+# Optional: MLflow for experiment tracking, metrics, promotion/rollback
+mlflow>=2.0.0

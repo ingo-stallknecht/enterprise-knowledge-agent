@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Always use the current working directory as the repo root (works reliably on Windows Git Bash / PowerShell)
+# Always use the current working directory as the repo root (works reliably on Windows GitBash / PowerShell)
 URI="$(python - <<'PY'
 import pathlib
 root = pathlib.Path.cwd()           # <— repo root if you run this script from the repo root

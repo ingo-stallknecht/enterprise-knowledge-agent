@@ -214,7 +214,6 @@ feedback, and removing blockers. Managers role-model values and cite them in fee
 """,
 }
 
-
 def write_seed_corpus() -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     for name, content in SEED_MD.items():
@@ -227,19 +226,15 @@ def write_seed_corpus() -> Dict:
 def _scan_processed_files() -> List[pathlib.Path]:
     return sorted(PROC_DIR.glob("**/*.md"))
 
-
 def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
-
 
 def have_any_markdown() -> bool:
     return any(PROC_DIR.rglob("*.md"))
 
-
 def _hash_source(source_path: str) -> str:
     s = source_path.encode("utf-8", errors="ignore")
     return hashlib.sha1(s).hexdigest()[:16]
-
 
 def load_manifest() -> Dict[str, Dict]:
     if MANIFEST.exists():
@@ -249,10 +244,8 @@ def load_manifest() -> Dict[str, Dict]:
             return {}
     return {}
 
-
 def save_manifest(m: Dict[str, Dict]) -> None:
     MANIFEST.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
-
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
     import numpy as np
@@ -265,7 +258,6 @@ def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> Non
     m = load_manifest()
     m[source] = {"vec": str(vpath), "recs": str(rpath), "n": len(records_list)}
     save_manifest(m)
-
 
 def remove_cache_for_sources(sources: List[str]) -> List[str]:
     removed = []
@@ -283,7 +275,6 @@ def remove_cache_for_sources(sources: List[str]) -> List[str]:
         removed.append(s)
     save_manifest(m)
     return removed
-
 
 def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
     import numpy as np
@@ -318,11 +309,9 @@ def get_models():
             rer = None
     return emb, rer
 
-
 @st.cache_resource(show_spinner=False)
 def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
-
 
 def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx = load_or_init_index()
@@ -331,7 +320,6 @@ def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx.build(X, records)
     if progress:
         progress.update(label="Done", value=1.0)
-
 
 def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
     import numpy as np
@@ -345,7 +333,6 @@ def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
         progress.update(label=f"Assembling {len(records)} chunks…", value=0.35)
     save_index(X, records, progress)
     return {"num_files": len(set(r["source"] for r in records)), "num_chunks": len(records)}
-
 
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     files = _scan_processed_files()
@@ -377,7 +364,6 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
         X = np.zeros((0, 384), dtype="float32")
     save_index(X, all_recs, progress)
     return {"num_files": len(files), "num_chunks": len(all_recs)}
-
 
 def incremental_add(markdown_text: str, source_path: str, progress: Optional[Prog] = None) -> Dict:
     chunks = _split_md(markdown_text)
@@ -434,9 +420,7 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     }
     return top_records, reranked, meta
 
-
 _SENT_SPLIT = re.compile(r"(?<=[\.\?!])\s+(?=[A-Z0-9])")
-
 
 def _split_sentences(text: str) -> List[str]:
     t = (text or "").strip()
@@ -457,7 +441,6 @@ def _split_sentences(text: str) -> List[str]:
     if buf:
         out.append(buf)
     return out
-
 
 def attribute(answer: str, records: List[Dict]) -> List[dict]:
     if not answer or not records:
@@ -487,7 +470,6 @@ def attribute(answer: str, records: List[Dict]) -> List[dict]:
         )
     return out
 
-
 def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
     cites = []
     for i, (r, sc) in enumerate(pairs[:k], 1):
@@ -513,7 +495,6 @@ def _index_health() -> Tuple[str, str]:
     except Exception:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
-
 st.markdown(
     "<div class='header-row'>"
     "<div><h3>Enterprise Knowledge Agent</h3>"
@@ -526,6 +507,27 @@ badge_html, _ = _index_health()
 _status_slot.markdown(
     f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
     unsafe_allow_html=True,
+)
+
+# ---------- Orientation text for new users ----------
+st.markdown(
+    """
+> **How to use this app**
+>
+> - **Ask** – Ask natural-language questions. The app searches a GitLab-inspired handbook plus your wiki pages  
+>   and answers *strictly* from those documents with citations and a context visualizer.
+> - **Agent** – Describe a task. The agent can  
+>   1) propose & create wiki pages,  
+>   2) delete pages (only inside `data/processed/wiki/`),  
+>   3) edit existing wiki pages, or  
+>   4) just answer normally with no side effects.  
+>   All create/delete/edit actions require your confirmation.
+> - **Upload** – Add your own `.md` / `.txt` files; they become part of the knowledge base and show up in answers.
+> - **About** – See an overview of how the system works and browse the Markdown documents that are currently indexed.
+>
+> The initial corpus is based on a small subset of the public **GitLab Handbook**  
+> (<https://about.gitlab.com/handbook/>), plus any wiki pages and uploads you add here.
+"""
 )
 
 # ---------- Bootstrap (optional) ----------
@@ -541,7 +543,6 @@ CURATED = [
     "https://about.gitlab.com/handbook/leadership/",
     "https://about.gitlab.com/handbook/engineering/management/",
 ]
-
 
 def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     if requests is None or md is None:
@@ -567,13 +568,11 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             pass
     return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
 
-
 def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
     n_files = len(files)
     n_bytes = sum((f.stat().st_size for f in files), 0)
     return {"files": n_files, "size_kb": int(n_bytes / 1024)}
-
 
 def copy_prebuilt_if_available() -> bool:
     pre_faiss = PREBUILT_DIR / pathlib.Path(INDEX_PATH).name
@@ -584,7 +583,6 @@ def copy_prebuilt_if_available() -> bool:
         shutil.copy2(pre_store, STORE_PATH)
         return True
     return False
-
 
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     if USE_PREBUILT and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
@@ -602,7 +600,6 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
-
 
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
@@ -716,7 +713,6 @@ DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+
 CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
 EDIT_PAT   = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
 
-
 def classify_intent(msg: str) -> Tuple[str, Dict]:
     text = (msg or "").strip()
 
@@ -754,7 +750,6 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     # 4) Answer normally
     return "answer", {}
 
-
 def concise_title(title: str) -> str:
     t = (title or "Untitled").strip()
     t = re.sub(r"\?$", "", t)
@@ -783,7 +778,6 @@ _BLOCK_PATTERNS = [
 ]
 _BLOCK_RE = re.compile("|".join(_BLOCK_PATTERNS), re.I)
 
-
 def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
     if not title.strip():
         return False, "Title is empty."
@@ -792,7 +786,6 @@ def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
     if _BLOCK_RE.search(title) or _BLOCK_RE.search(content or ""):
         return False, "Title or content appears to contain harmful or disallowed content."
     return True, ""
-
 
 def render_wiki_md_template(title: str, key_points: List[str]) -> str:
     bullets = "\n".join(f"- {p}" for p in key_points) if key_points else "- Add specific behaviors and links to evidence."
@@ -825,7 +818,6 @@ def render_wiki_md_template(title: str, key_points: List[str]) -> str:
 (Synthesized from indexed documents.)
 """
 
-
 def _split_sentences_for_points(txt: str) -> List[str]:
     out = []
     for s in _split_sentences(txt or ""):
@@ -837,7 +829,6 @@ def _split_sentences_for_points(txt: str) -> List[str]:
         ):
             out.append(s2)
     return out
-
 
 def extract_key_points(
     query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5
@@ -923,14 +914,12 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     res = incremental_add(content, created_path, progress=prog)
     return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
 
-
 def _is_in_wiki_folder(p: pathlib.Path) -> bool:
     try:
         p.resolve().relative_to(WIKI_DIR.resolve())
         return True
     except Exception:
         return False
-
 
 def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     deleted_paths: List[str] = []
@@ -948,7 +937,6 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     prog = Prog("Refreshing index from cache…")
     _ = rebuild_from_cache(prog)
     return {"deleted": deleted_paths, "num_deleted": len(deleted_paths)}
-
 
 def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
     """Edit an existing wiki file, keeping it in the wiki folder, and refresh its vectors only."""
@@ -1325,22 +1313,34 @@ with tab_upload:
 def _list_md_files() -> List[Dict]:
     files = sorted(PROC_DIR.rglob("*.md"))
     out = []
+    MAX_CHARS = 2000  # show full content for small files, truncate very long ones
     for f in files:
         try:
             text = f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             text = ""
-        preview_lines = (text.strip().splitlines() + [""])[:6]
+        full_text = text.strip()
+        truncated = False
+        if len(full_text) > MAX_CHARS:
+            # Cut at a line boundary near MAX_CHARS if possible
+            snippet = full_text[:MAX_CHARS]
+            last_newline = snippet.rfind("\n")
+            if last_newline > MAX_CHARS * 0.7:
+                snippet = snippet[:last_newline]
+            preview = snippet.strip()
+            truncated = True
+        else:
+            preview = full_text
         out.append(
             {
                 "path": str(f).replace("\\", "/"),
                 "name": f.name,
                 "kb": max(1, f.stat().st_size // 1024),
-                "preview": "\n".join(preview_lines).strip(),
+                "preview": preview,
+                "truncated": truncated,
             }
         )
     return out
-
 
 with tab_about:
     st.markdown("### How this works")
@@ -1352,6 +1352,7 @@ with tab_about:
 - **Vector cache:** deletes and edits never re-embed all files; index is rebuilt from cached vectors.
 - **Prebuilt index:** drop files into `data/index/prebuilt/` to skip first-run builds.
 - **Safety:** harmful titles/content are blocked; deletes/edits are restricted to the wiki folder.
+- **Documents view:** below you can inspect the Markdown files that are currently part of the corpus.
 """
     )
     stats_now = corpus_stats()
@@ -1365,4 +1366,9 @@ with tab_about:
         for item in md_list:
             header = f"{item['name']}  ·  ~{item['kb']} KB  ·  {item['path']}"
             with st.expander(header, expanded=False):
-                st.code(item["preview"] or "(empty)", language="markdown")
+                if item.get("preview"):
+                    st.code(item["preview"], language="markdown")
+                    if item.get("truncated"):
+                        st.caption("Preview truncated – file is longer in full.")
+                else:
+                    st.write("(empty)")

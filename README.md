@@ -88,10 +88,11 @@ Tracks retrieval metrics, index versions, evaluation results, and promotion/roll
 
 **Promotion logic:**
 ```txt
-If new index improves metrics:
-    promote as production
+If candidate meets absolute thresholds AND
+   candidate >= current_production
+       promote candidate to production
 Else:
-    rollback to previous version
+       keep current production as is (do nothing)
 ```
 	
 <ADD SCREENSHOT OF MLFLOW UI HERE>

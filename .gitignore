@@ -11,7 +11,7 @@ __pycache__/
 # Data & artifacts (don’t commit runtime data)
 data/
 mlruns/
-mlflow/
+mlflow/mlruns
 mlflow_artifacts/
 
 # Airflow

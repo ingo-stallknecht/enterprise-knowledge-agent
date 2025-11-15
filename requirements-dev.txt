@@ -1,0 +1,16 @@
+# requirements-dev.txt
+# Development dependencies (not required for running the Streamlit app)
+
+# Load all runtime dependencies
+-r requirements.txt
+
+# Testing
+pytest
+
+# Code quality / linting
+pre-commit
+black
+flake8
+
+# Optional: test coverage
+coverage

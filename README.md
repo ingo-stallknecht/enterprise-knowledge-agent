@@ -1,7 +1,7 @@
 # Enterprise Knowledge Agent
 
 ![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-6fs3f3ha2qmmbi4wwgxyjn.streamlit.app/)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-yjmgeytutbelggasr2qbzy.streamlit.app/)
 ![Last Commit](https://img.shields.io/github/last-commit/ingo-stallknecht/enterprise-knowledge-agent)
 
 Hybrid RAG with FAISS + SentenceTransformers, optional GPT-assisted answers, and a polished Streamlit UI.  

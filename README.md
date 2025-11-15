@@ -92,7 +92,7 @@ Tracks retrieval metrics, index versions, evaluation results, and promotion/roll
 
 **Promotion logic:**
 ```txt
-If candidate meets absolute thresholds AND
+If candidate meets evaluation thresholds AND
    candidate >= current_production:
        promote candidate to production
 Else:

@@ -1,23 +1,24 @@
-# requirements.txt
-# Runtime dependencies for the Streamlit app
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
 
-streamlit==1.38.0
-
-# Core numerical / ML stack
+# Core
 numpy==1.26.4
 scikit-learn==1.5.1
-faiss-cpu
+torch==2.4.1
+faiss-cpu==1.8.0.post1
 
-# Embeddings / models
+# Models
 sentence-transformers==3.0.1
+transformers==4.44.2
 
-# App / utilities
+# App
+streamlit==1.38.0
+python-slugify==8.0.4
 markdownify==0.14.1
 requests==2.32.3
 python-dotenv==1.0.1
 pyyaml==6.0.2
-python-slugify==8.0.4
 
-# OpenAI client + tokenization
+# OpenAI client
 openai>=1.40.0
 tiktoken>=0.7.0

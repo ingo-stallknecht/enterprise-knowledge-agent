@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](#)
 [![CI](https://github.com/ingo-stallknecht/enterprise-knowledge-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ingo-stallknecht/enterprise-knowledge-agent/actions/workflows/ci.yml)
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-5xd4u2vz9w9xrns4fgh9tv.streamlit.app/)
-![Last Commit](https://img.shields.io/github/last-commit/ingo-stallknecht/enterprise-knowledge-agent)
+![Last Commit](https://img.shields.io/github/last-commit/ingo-stallknecht/enterprise-knowledge-agent?cacheSeconds=3600)
 
 ---
 

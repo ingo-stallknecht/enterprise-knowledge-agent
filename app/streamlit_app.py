@@ -238,15 +238,20 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
 
-# Determine OpenAI status (plain text only)
-use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
-has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-has_key_secret = bool(st and "OPENAI_API_KEY" in getattr(st, "secrets", {}))
+# Determine OpenAI status (plain text only) – align with _have_openai_client
+try:
+    key_from_secrets = str(st.secrets["OPENAI_API_KEY"])
+    has_key_secret = bool(key_from_secrets.strip())
+except Exception:
+    has_key_secret = False
 
-if use_flag and (has_key_env or has_key_secret):
+has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+if has_key_env or has_key_secret:
     openai_status = "ON"
 else:
     openai_status = "OFF"
+
 
 # Render header (plain text OpenAI status, no emojis)
 st.markdown(
@@ -1007,17 +1012,31 @@ def extract_key_points(
 # ---------- GPT-4 wiki drafting ----------
 def _have_openai_client() -> bool:
     """
-    Small helper so the Agent's wiki-drafting logic and the Ask tab
-    follow the same rules for when OpenAI is 'available'.
+    Decide if OpenAI can be used.
+
+    - Prefer OPENAI_API_KEY from st.secrets.
+    - Fall back to environment variable if needed.
+    - Do NOT depend on USE_OPENAI; if you want to
+      disable OpenAI, unset the key instead.
     """
     if _OpenAI is None:
         return False
-    if os.environ.get("USE_OPENAI", "false").lower() != "true":
-        return False
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+    # 1) Secrets first
+    key = ""
+    try:
+        key = st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        key = os.environ.get("OPENAI_API_KEY", "")
+
+    key = str(key or "").strip()
     if not key:
         return False
+
+    # Ensure the env var is set for the OpenAI client
+    os.environ["OPENAI_API_KEY"] = key
     return True
+
 
 
 def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:

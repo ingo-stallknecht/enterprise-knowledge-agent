@@ -1,20 +1,22 @@
+# requirements.txt
+# Runtime dependencies for the Streamlit app (used by Streamlit Cloud)
+
+# UI
 streamlit==1.38.0
 
+# Core numerical / ML stack
 numpy==1.26.4
-scikit-learn==1.5.1
 
-# Lightweight FAISS wheel
-faiss-cpu==1.7.4
+# Embeddings / models
+sentence-transformers==2.2.2  # 3.x pulls heavy dependencies, 2.2.2 is lighter & stable
 
-# Avoid sentence-transformers 3.x (pulls PyTorch); use stable version
-sentence-transformers==2.2.2
-
+# App / utilities
 markdownify==0.14.1
 requests==2.32.3
 python-dotenv==1.0.1
 pyyaml==6.0.2
 python-slugify==8.0.4
 
-# Pin lighter OpenAI + tiktoken versions
+# OpenAI client + tokenization
 openai==1.12.0
 tiktoken==0.6.0

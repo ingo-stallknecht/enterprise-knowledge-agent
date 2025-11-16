@@ -933,15 +933,32 @@ def extract_key_points(
 
 
 # ---------- GPT-4 wiki drafting ----------
+
+def _have_openai_client() -> bool:
+    """
+    Small helper so the Agent's wiki-drafting logic and the Ask tab
+    follow the same rules for when OpenAI is 'available'.
+    """
+    if _OpenAI is None:
+        return False
+    if os.environ.get("USE_OPENAI", "false").lower() != "true":
+        return False
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        return False
+    return True
+
+
 def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:
-    """Use GPT-4o if available; otherwise fallback to configured model; if no client/key, return None."""
-    if not (
-        _OpenAI
-        and os.environ.get("OPENAI_API_KEY", "").strip()
-        and os.environ.get("USE_OPENAI", "false") == "true"
-    ):
+    """
+    Use GPT-4o (or configured model) to draft a wiki page.
+
+    - If OpenAI is not available or anything fails, return None.
+    - Caller falls back to a deterministic template in that case.
+    """
+    if not _have_openai_client():
         return None
-    client = _OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
     bullets = "\n".join(f"- {p}" for p in key_points) if key_points else ""
     system = (
         "You are a helpful documentation writer for an internal engineering handbook. "
@@ -957,27 +974,42 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
         "Ensure feedback is time-boxed and collected before deadlines.\n"
         "Return only the Markdown content of the page."
     )
+
     try:
+        client = _OpenAI()  # uses OPENAI_API_KEY from env
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))
+
         resp = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.3,
+            model="gpt-4o",  # prefer 4o for drafting
+            temperature=temperature,
             max_tokens=900,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
         )
         text = (resp.choices[0].message.content or "").strip()
-        return text or None
+        if text:
+            return text
+
+        # Fallback to configured model if 4o returns empty for some reason
+        resp2 = client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            max_tokens=900,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text2 = (resp2.choices[0].message.content or "").strip()
+        return text2 or None
+
     except Exception:
-        try:
-            resp = client.chat.completions.create(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-                temperature=0.3,
-                max_tokens=900,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            )
-            text = (resp.choices[0].message.content or "").strip()
-            return text or None
-        except Exception:
-            return None
+        # Any error: signal caller to fall back to the static template
+        return None
+
 
 
 # ---------- Wiki actions ----------

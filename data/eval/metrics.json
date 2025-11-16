@@ -1,8 +1,0 @@
-{
-  "num_questions": 51,
-  "k": 12,
-  "retrieval_hit_rate": 1.0,
-  "precision_at_k": 0.8251633986928102,
-  "mrr": 0.9673202614379085,
-  "timestamp": 1762530763
-}

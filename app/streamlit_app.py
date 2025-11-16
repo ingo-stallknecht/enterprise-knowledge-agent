@@ -82,13 +82,29 @@ os.environ.update(
 # ---------- OpenAI / LLM ----------
 
 def _secret(k: str, default=None):
-    """Read from Streamlit secrets first, then environment, with a safe default."""
+    """
+    Read from Streamlit secrets first (flat or nested), then environment.
+    This supports both:
+      OPENAI_API_KEY = "..."
+    and:
+      [general]
+      OPENAI_API_KEY = "..."
+    """
+    # 1) Try flat secrets
     try:
-        if k in st.secrets:
-            return str(st.secrets[k])
+        if hasattr(st, "secrets"):
+            if k in st.secrets:
+                return str(st.secrets[k])
+            # 2) Try nested dicts: [section] KEY = "..."
+            for v in st.secrets.values():
+                if isinstance(v, dict) and k in v:
+                    return str(v[k])
     except Exception:
         pass
+
+    # 3) Fallback to environment
     return os.environ.get(k, default)
+
 
 
 def _init_openai_from_config() -> dict:

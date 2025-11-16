@@ -1139,18 +1139,87 @@ with tab_agent:
     state = st.session_state["agent_state"]
 
     # Main agent form (Run button stays near input)
-    with st.form("agent_main_form", clear_on_submit=False):
-        msg = st.text_area(
-            "Goal or task",
-            height=110,
-            placeholder="Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear bullet points.; "
-            "delete demo-page.md; edit demo-page.md; or just ask a question.",
-            key="agent_msg",
-        )
-        submitted_run = st.form_submit_button("Run", type="primary")
+if "agent_state" not in st.session_state:
+    st.session_state["agent_state"] = {
+        "mode": "idle",             # idle | create_proposed | delete_proposed | edit_proposed
+        "proposed_title": "",
+        "proposed_content": "",
+        "delete_candidates": [],
+        "edit_candidates": [],
+        "edit_selected": "",
+        "edit_original": "",
+        "last_message": "",
+        "last_display": "",
+    }
 
-    if submitted_run:
-        text = (msg or "").strip()
+# Intent regexes (unchanged)
+DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
+CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
+EDIT_PAT   = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
+
+def classify_intent(msg: str) -> Tuple[str, Dict]:
+    text = (msg or "").strip()
+
+    # 1) Delete
+    mdm = DELETE_PAT.search(text)
+    if mdm:
+        target = mdm.group("target").strip().strip('"\'')
+        target = target.rstrip(".")
+        return "delete_wiki", {"query": target[:200] if target else ""}
+
+    # 2) Create
+    if CREATE_PAT.search(text):
+        m_title = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
+        if m_title:
+            title = m_title.group(1)
+        else:
+            title = re.sub(
+                r".*\b(wiki|page|article|doc)\b( about| on|:)?\s*",
+                "",
+                text,
+                flags=re.I,
+            )
+        title = (title or "").strip().rstrip(".")
+        return "create_wiki", {"title": title[:120] if title else "Untitled"}
+
+    # 3) Edit
+    em = EDIT_PAT.search(text)
+    if em:
+        target = em.group("target").strip().strip('"\'')
+        target = target.rstrip(".")
+        return "edit_wiki", {"query": target[:200] if target else ""}
+
+    # 4) Answer normally
+    return "answer", {}
+
+
+with tab_agent:
+    st.markdown("**Agent**")
+    st.write(
+        "The agent can (1) propose and create wiki pages, (2) delete pages (wiki folder only), "
+        "(3) edit wiki pages, or (4) answer normally. "
+        "Create, delete, and edit actions always require your confirmation."
+    )
+
+    if READ_ONLY:
+        st.info("Read-only mode is ON. Creating, deleting, and editing pages is disabled.")
+
+    agent_result = st.container()
+    state = st.session_state["agent_state"]
+
+    # ✅ Stable input: no form, no jumping
+    agent_query = st.text_area(
+        "Goal or task",
+        height=110,
+        placeholder='Examples: create a wiki page "Values in Performance Reviews"; '
+                    'delete values.md; edit values.md; or just ask a question.',
+        key="agent_msg",
+    )
+    col_run, _ = st.columns([1, 3])
+    run_agent = col_run.button("Run", type="primary", key="agent_run_btn")
+
+    if run_agent:
+        text = (agent_query or "").strip()
         if not text:
             with agent_result:
                 st.warning("Please describe what you want the agent to do.")
@@ -1243,7 +1312,6 @@ with tab_agent:
                         with agent_result:
                             st.info("No matching wiki files found in the wiki folder.")
                     else:
-                        # Let user pick which file to edit in a separate form below
                         state.update(
                             {
                                 "mode": "edit_proposed",
@@ -1269,11 +1337,7 @@ with tab_agent:
                 ans, llm_meta = generate_answer(recs, text, max_chars=900)
                 if not ans or ans.strip() in {".", ""}:
                     joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                    ans = (
-                        joined[:900]
-                        if joined
-                        else "No relevant context found in the current corpus."
-                    )
+                    ans = joined[:900] if joined else "No relevant context found in the current corpus."
                 state.update(
                     {
                         "mode": "idle",

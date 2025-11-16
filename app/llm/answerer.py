@@ -61,7 +61,6 @@ def _get_use_openai_flag() -> bool:
     return False
 
 
-
 def _get_openai_key() -> str:
     """
     Read OPENAI_API_KEY from env or Streamlit secrets.

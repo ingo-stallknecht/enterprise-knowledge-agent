@@ -632,7 +632,6 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     return {"ok": ok > 0, "downloaded": ok, "total": total}
 
 
-
 def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
     n_files = len(files)
@@ -763,9 +762,9 @@ st.markdown(
     """
 **What this app can do**
 
-- **Ask tab** – plain-language questions over the handbook + wiki, with citations and a context visualizer.  
-- **Agent tab** – higher-level tasks: create, delete, or edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer normally.  
-- **Upload tab** – add your own `.md`/`.txt` files into the wiki corpus; they’ll be retrieved and cited like the handbook.  
+- **Ask tab** – plain-language questions over the handbook + wiki, with citations and a context visualizer.
+- **Agent tab** – higher-level tasks: create, delete, or edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer normally.
+- **Upload tab** – add your own `.md`/`.txt` files into the wiki corpus; they’ll be retrieved and cited like the handbook.
 - **About tab** – see how the system works under the hood and inspect the current Markdown corpus.
 """
 )
@@ -807,7 +806,11 @@ with tab_ask:
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
                 joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
+                ans = (
+                    joined[:max_chars]
+                    if joined
+                    else "No relevant context found in the current corpus."
+                )
             st.subheader("Answer")
             st.write(ans)
             m1, m2, m3, m4 = st.columns(4)
@@ -864,9 +867,7 @@ with tab_ask:
                 src = row.get("best_source", "")
                 rk = row.get("best_rank", "-")
                 title = f"Top source #{rk}\n{src}\n(score {s:.2f})"
-                pills.append(
-                    f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>"
-                )
+                pills.append(f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>")
             st.markdown("".join(pills), unsafe_allow_html=True)
             st.markdown("#### Sources")
             for c in fmt_citations(pairs, TOP_K):
@@ -892,9 +893,7 @@ if "agent_state" not in st.session_state:
 
 # Intent regexes (DELETE first, then CREATE, then EDIT)
 DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
-CREATE_PAT = re.compile(
-    r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I
-)
+CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
 EDIT_PAT = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
 
 
@@ -1346,14 +1345,10 @@ with tab_agent:
             else:
                 # Helpful answer (no side effects)
                 ensure_ready_and_index(False)
-                recs, pairs, meta = retrieve(
-                    text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
-                )
+                recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
                 if len(pairs) == 0:
                     ensure_ready_and_index(True)
-                    recs, pairs, meta = retrieve(
-                        text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
-                    )
+                    recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
                 ans, llm_meta = generate_answer(recs, text, max_chars=900)
                 if not ans or ans.strip() in {".", ""}:
                     joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
@@ -1373,9 +1368,7 @@ with tab_agent:
                     st.write(ans)
                     st.markdown("#### Sources")
                     for c in fmt_citations(pairs, k=min(6, len(pairs))):
-                        label = (
-                            f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"
-                        )
+                        label = f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"
                         with st.expander(label, expanded=False):
                             st.write(c["preview"])
 
@@ -1560,13 +1553,10 @@ with tab_upload:
             prog = Prog("Updating index…")
             res = incremental_add(text, str(dst).replace("\\", "/"), progress=prog)
             if res.get("appended", False):
-                st.success(
-                    f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md"
-                )
+                st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
             else:
-                st.success(
-                    f"✅ Refreshed index from cache; added {res['added_chunks']} chunks."
-                )
+                st.success(f"✅ Refreshed index from cache; added {res['added_chunks']} chunks.")
+
 
 # ===== ABOUT =====
 def _list_md_files() -> List[Dict]:

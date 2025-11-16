@@ -4,6 +4,12 @@ from typing import List, Dict, Tuple
 import os
 import textwrap
 
+# Optional: we try to access Streamlit secrets if available (for Streamlit Cloud)
+try:
+    import streamlit as st  # type: ignore
+except Exception:  # running in tests / non-Streamlit context
+    st = None
+
 try:
     # New OpenAI client (>=1.0)
     from openai import OpenAI as _OpenAI
@@ -11,17 +17,80 @@ except Exception:
     _OpenAI = None
 
 
+# -------------------------------------------------------------------
+# Helpers to hydrate env from Streamlit secrets if available
+# -------------------------------------------------------------------
+
+def _hydrate_openai_env_from_secrets() -> None:
+    """
+    Ensure OPENAI_API_KEY and USE_OPENAI are set in os.environ if possible.
+
+    This mirrors the logic you used in streamlit_app.py but makes the
+    answerer self-contained, so it also works if imports / init order
+    are different on Streamlit Cloud.
+    """
+    # 1) USE_OPENAI: default to "true" unless explicitly disabled
+    if os.environ.get("USE_OPENAI") is None:
+        val = "true"
+        if st is not None:
+            try:
+                raw = st.secrets.get("USE_OPENAI", None)
+                if raw is not None:
+                    val = str(raw).lower()
+            except Exception:
+                pass
+        os.environ["USE_OPENAI"] = "true" if val == "true" else "false"
+
+    # 2) OPENAI_API_KEY: if missing in env, try to pull from secrets
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        return
+
+    if st is None:
+        return
+
+    key = ""
+    try:
+        # Direct keys at root
+        for k in ["OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY", "openai_api_key", "openai_key"]:
+            if k in st.secrets:
+                v = str(st.secrets[k]).strip()
+                if v:
+                    key = v
+                    break
+
+        # Nested sections
+        if not key:
+            for section in ("openai", "OPENAI", "llm"):
+                if section in st.secrets and isinstance(st.secrets[section], dict):
+                    sec = st.secrets[section]
+                    for k in ("api_key", "API_KEY", "key"):
+                        v = str(sec.get(k, "")).strip()
+                        if v:
+                            key = v
+                            break
+                    if key:
+                        break
+    except Exception:
+        key = ""
+
+    if key:
+        os.environ["OPENAI_API_KEY"] = key
+
+
 def _openai_enabled() -> bool:
     """
     Check if we should attempt to use OpenAI.
 
     Conditions:
-    - USE_OPENAI=true (env)
+    - USE_OPENAI=true (env, with default handled by _hydrate_openai_env_from_secrets)
     - OPENAI_API_KEY present and non-empty
     - openai client import succeeded
     """
     if _OpenAI is None:
         return False
+
+    # Make sure env is hydrated from secrets if available
+    _hydrate_openai_env_from_secrets()
 
     if os.environ.get("USE_OPENAI", "false").lower() != "true":
         return False
@@ -44,7 +113,6 @@ def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
         if not txt:
             continue
         if total + len(txt) + 2 > max_chars:
-            # Add as much as we can without exploding
             remaining = max_chars - total
             if remaining > 0:
                 parts.append(txt[:remaining])
@@ -97,7 +165,7 @@ def generate_answer(
     # Try OpenAI first if enabled
     if _openai_enabled():
         try:
-            client = _OpenAI()  # key read from env
+            client = _OpenAI()  # key read from env (OPENAI_API_KEY)
 
             model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
             temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))

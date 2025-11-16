@@ -212,16 +212,50 @@ st.markdown(
 
 # ---------- Progress ----------
 class Prog:
+    """
+    Lightweight progress helper that auto-hides itself when done.
+
+    Usage:
+        prog = Prog("Indexing corpus…")
+        prog.update(label="Embedding files…", value=0.4)
+        ...
+        prog.update(label="Done", value=1.0)  # bar disappears shortly after
+    """
     def __init__(self, initial_text: str = "Working…"):
-        self._pb = st.progress(0, text=initial_text)
+        # Use a container slot so we can later clear the progress bar completely
+        self._slot = st.empty()
         self._last = 0.0
+        self._text = initial_text
+        with self._slot:
+            self._bar = st.progress(0, text=initial_text)
 
     def update(self, label: Optional[str] = None, value: Optional[float] = None):
+        # Keep last value if none is provided
         if value is None:
             value = self._last
         value = max(0.0, min(float(value), 1.0))
         self._last = value
-        self._pb.progress(int(value * 100), text=label if label is not None else None)
+
+        # Remember latest label so we can reuse it
+        if label is not None:
+            self._text = label
+
+        # Update the visible bar
+        try:
+            self._bar.progress(
+                int(value * 100),
+                text=self._text if label is None else label,
+            )
+        except Exception:
+            # In case Streamlit changes internals or the bar is gone,
+            # fail silently instead of crashing the app.
+            pass
+
+        # Auto-hide when we are basically done
+        if value >= 0.999:
+            # tiny pause so users see "Done" briefly
+            time.sleep(0.15)
+            self._slot.empty()
 
 
 # ---------- Seed corpus ----------

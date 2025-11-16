@@ -1,4 +1,4 @@
-# app/streamlit_app.py
+# app/app.py
 # Streamlit-only Enterprise Knowledge Agent with GPT-4 wiki drafting, safety filter,
 # guarded deletes/edits (wiki folder only), and incremental indexing.
 #
@@ -14,7 +14,14 @@
 
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
+
 import streamlit as st
+from dotenv import load_dotenv  # NEW
+
+# --------------------------------------------------
+# Load .env early so local OPENAI_API_KEY / USE_OPENAI are available
+# --------------------------------------------------
+load_dotenv()
 
 # ---------- Optional deps ----------
 try:
@@ -32,39 +39,54 @@ try:
 except Exception:
     _OpenAI = None
 
+
 def _secret(k, default=None):
     try:
         return st.secrets[k]
     except Exception:
         return os.environ.get(k, default)
 
+
 # ---------- Writable caches (Streamlit Cloud friendly) ----------
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
 if not WRITABLE_BASE.exists():
     WRITABLE_BASE = pathlib.Path(tempfile.gettempdir()) / "eka"
 HF_CACHE = WRITABLE_BASE / "hf"
-for p in (WRITABLE_BASE, HF_CACHE, WRITABLE_BASE / ".cache" / "huggingface", WRITABLE_BASE / ".huggingface"):
+for p in (
+    WRITABLE_BASE,
+    HF_CACHE,
+    WRITABLE_BASE / ".cache" / "huggingface",
+    WRITABLE_BASE / ".huggingface",
+):
     p.mkdir(parents=True, exist_ok=True)
-os.environ.update({
-    "HOME": str(WRITABLE_BASE),
-    "HF_HUB_DISABLE_TOKEN_SEARCH": "1",
-    "HUGGING_FACE_HUB_TOKEN": "",
-    "HF_TOKEN": "",
-    "HUGGINGFACE_HUB_DISABLE_TELEMETRY": "1",
-    "HF_HUB_DISABLE_TELEMETRY": "1",
-    "HF_HUB_DISABLE_CACHE_SYMLINKS": "1",
-    "HF_HUB_OFFLINE": "0",
-    "TOKENIZERS_PARALLELISM": "false",
-    "HF_HOME": str(HF_CACHE),
-    "TRANSFORMERS_CACHE": str(HF_CACHE),
-    "SENTENCE_TRANSFORMERS_HOME": str(HF_CACHE),
-    "HUGGINGFACE_HUB_CACHE": str(HF_CACHE),
-    "XDG_CACHE_HOME": str(WRITABLE_BASE),
-})
+os.environ.update(
+    {
+        "HOME": str(WRITABLE_BASE),
+        "HF_HUB_DISABLE_TOKEN_SEARCH": "1",
+        "HUGGING_FACE_HUB_TOKEN": "",
+        "HF_TOKEN": "",
+        "HUGGINGFACE_HUB_DISABLE_TELEMETRY": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "HF_HUB_DISABLE_CACHE_SYMLINKS": "1",
+        "HF_HUB_OFFLINE": "0",
+        "TOKENIZERS_PARALLELISM": "false",
+        "HF_HOME": str(HF_CACHE),
+        "TRANSFORMERS_CACHE": str(HF_CACHE),
+        "SENTENCE_TRANSFORMERS_HOME": str(HF_CACHE),
+        "HUGGINGFACE_HUB_CACHE": str(HF_CACHE),
+        "XDG_CACHE_HOME": str(WRITABLE_BASE),
+    }
+)
 
 # ---------- OpenAI / LLM ----------
 def _find_secret_key() -> str:
-    candidates = ["OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY", "openai_api_key", "openai_key"]
+    candidates = [
+        "OPENAI_API_KEY",
+        "OPENAI_KEY",
+        "OPENAI_APIKEY",
+        "openai_api_key",
+        "openai_key",
+    ]
     try:
         for k in candidates:
             if k in st.secrets:
@@ -79,24 +101,34 @@ def _find_secret_key() -> str:
                         return v
     except Exception:
         pass
+    # Fallback: environment variables (now populated from .env via load_dotenv)
     for k in candidates:
         v = str(os.getenv(k, "")).strip()
         if v:
             return v
     return ""
 
-use_openai_flag = str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower() == "true"
+
+# Use st.secrets.USE_OPENAI if present, else env, else "true"
+use_openai_flag = (
+    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower()
+    == "true"
+)
 os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
+
 _key = _find_secret_key()
 if _key:
     os.environ["OPENAI_API_KEY"] = _key
 
 # Prefer GPT-4o for wiki drafting; respect user's model elsewhere
-DEFAULT_LLM_MODEL = str(st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")))
+DEFAULT_LLM_MODEL = str(
+    st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+)
 os.environ["OPENAI_MODEL"] = DEFAULT_LLM_MODEL
 os.environ["OPENAI_MAX_DAILY_USD"] = str(
     st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80"))
 )
+
 
 def _openai_diag() -> str:
     use = os.environ.get("USE_OPENAI", "false").lower() == "true"
@@ -105,8 +137,9 @@ def _openai_diag() -> str:
     if use and key:
         return f"OpenAI: ON (key ✓, model {model})"
     if use and not key:
-        return "OpenAI: ON (key missing)"
+        return "OpenAI: ON (key missing ⚠)"
     return "OpenAI: OFF"
+
 
 # ---------- Settings ----------
 TOP_K = int(_secret("EKA_TOP_K", "12"))
@@ -190,6 +223,7 @@ class Prog:
         self._last = value
         self._pb.progress(int(value * 100), text=label if label is not None else None)
 
+
 # ---------- Seed corpus ----------
 SEED_MD: Dict[str, str] = {
     "values.md": """# Values at Our Company
@@ -214,6 +248,7 @@ feedback, and removing blockers. Managers role-model values and cite them in fee
 """,
 }
 
+
 def write_seed_corpus() -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     for name, content in SEED_MD.items():
@@ -222,19 +257,24 @@ def write_seed_corpus() -> Dict:
     (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
     return {"ok": True, "written": len(SEED_MD) + 2}
 
+
 # ---------- Helpers: files, chunks, manifest ----------
 def _scan_processed_files() -> List[pathlib.Path]:
     return sorted(PROC_DIR.glob("**/*.md"))
 
+
 def _split_md(text: str) -> List[Dict]:
     return list(split_markdown(text, **CHUNK_CFG))
+
 
 def have_any_markdown() -> bool:
     return any(PROC_DIR.rglob("*.md"))
 
+
 def _hash_source(source_path: str) -> str:
     s = source_path.encode("utf-8", errors="ignore")
     return hashlib.sha1(s).hexdigest()[:16]
+
 
 def load_manifest() -> Dict[str, Dict]:
     if MANIFEST.exists():
@@ -244,8 +284,10 @@ def load_manifest() -> Dict[str, Dict]:
             return {}
     return {}
 
+
 def save_manifest(m: Dict[str, Dict]) -> None:
     MANIFEST.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
+
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
     import numpy as np
@@ -258,6 +300,7 @@ def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> Non
     m = load_manifest()
     m[source] = {"vec": str(vpath), "recs": str(rpath), "n": len(records_list)}
     save_manifest(m)
+
 
 def remove_cache_for_sources(sources: List[str]) -> List[str]:
     removed = []
@@ -275,6 +318,7 @@ def remove_cache_for_sources(sources: List[str]) -> List[str]:
         removed.append(s)
     save_manifest(m)
     return removed
+
 
 def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
     import numpy as np
@@ -297,6 +341,7 @@ def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
     X = np.vstack(vecs) if len(vecs) > 1 else vecs[0]
     return X.astype("float32"), recs
 
+
 # ---------- Models & Index ----------
 @st.cache_resource(show_spinner=False)
 def get_models():
@@ -309,9 +354,11 @@ def get_models():
             rer = None
     return emb, rer
 
+
 @st.cache_resource(show_spinner=False)
 def load_or_init_index():
     return DocIndex(INDEX_PATH, STORE_PATH)
+
 
 def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx = load_or_init_index()
@@ -320,6 +367,7 @@ def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx.build(X, records)
     if progress:
         progress.update(label="Done", value=1.0)
+
 
 def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
     import numpy as np
@@ -333,6 +381,7 @@ def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
         progress.update(label=f"Assembling {len(records)} chunks…", value=0.35)
     save_index(X, records, progress)
     return {"num_files": len(set(r["source"] for r in records)), "num_chunks": len(records)}
+
 
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     files = _scan_processed_files()
@@ -365,6 +414,7 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     save_index(X, all_recs, progress)
     return {"num_files": len(files), "num_chunks": len(all_recs)}
 
+
 def incremental_add(markdown_text: str, source_path: str, progress: Optional[Prog] = None) -> Dict:
     chunks = _split_md(markdown_text)
     if progress:
@@ -389,6 +439,7 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
             progress.update(label="Refreshing index from cache…", value=0.7)
         stats = rebuild_from_cache(progress)
         return {"added_chunks": len(texts), "appended": False, "rebuilt": stats}
+
 
 # ---------- Retrieval & attribution ----------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
@@ -420,7 +471,9 @@ def retrieve(query: str, k: int, mode: str, use_reranker: bool):
     }
     return top_records, reranked, meta
 
+
 _SENT_SPLIT = re.compile(r"(?<=[\.\?!])\s+(?=[A-Z0-9])")
+
 
 def _split_sentences(text: str) -> List[str]:
     t = (text or "").strip()
@@ -441,6 +494,7 @@ def _split_sentences(text: str) -> List[str]:
     if buf:
         out.append(buf)
     return out
+
 
 def attribute(answer: str, records: List[Dict]) -> List[dict]:
     if not answer or not records:
@@ -470,6 +524,7 @@ def attribute(answer: str, records: List[Dict]) -> List[dict]:
         )
     return out
 
+
 def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
     cites = []
     for i, (r, sc) in enumerate(pairs[:k], 1):
@@ -484,6 +539,7 @@ def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
         )
     return cites
 
+
 # ---------- Header ----------
 def _index_health() -> Tuple[str, str]:
     try:
@@ -494,6 +550,7 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Empty</span>", "err"
     except Exception:
         return "<span class='badge badge-err'>Offline</span>", "err"
+
 
 st.markdown(
     "<div class='header-row'>"
@@ -546,6 +603,7 @@ CURATED = [
     "https://about.gitlab.com/handbook/engineering/management/",
 ]
 
+
 def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     if requests is None or md is None:
         return {"ok": False, "error": "requests/markdownify not available"}
@@ -570,11 +628,13 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             pass
     return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
 
+
 def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
     n_files = len(files)
     n_bytes = sum((f.stat().st_size for f in files), 0)
     return {"files": n_files, "size_kb": int(n_bytes / 1024)}
+
 
 def copy_prebuilt_if_available() -> bool:
     pre_faiss = PREBUILT_DIR / pathlib.Path(INDEX_PATH).name
@@ -585,6 +645,7 @@ def copy_prebuilt_if_available() -> bool:
         shutil.copy2(pre_store, STORE_PATH)
         return True
     return False
+
 
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     if USE_PREBUILT and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
@@ -602,6 +663,7 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
+
 
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
@@ -675,8 +737,13 @@ with tab_ask:
                 "<span class='cv-dot cv-b4'></span><span class='small'>very strong</span></div>",
                 unsafe_allow_html=True,
             )
-            def band(s): return 4 if s >= 0.75 else 3 if s >= 0.50 else 2 if s >= 0.30 else 1
-            def bcls(b): return {1: "cv-b1", 2: "cv-b2", 3: "cv-b3", 4: "cv-b4"}[b]
+
+            def band(s):
+                return 4 if s >= 0.75 else 3 if s >= 0.50 else 2 if s >= 0.30 else 1
+
+            def bcls(b):
+                return {1: "cv-b1", 2: "cv-b2", 3: "cv-b3", 4: "cv-b4"}[b]
+
             pills = []
             for row in attribute(ans, recs):
                 s = float(row.get("score", 0))
@@ -699,7 +766,7 @@ with tab_ask:
 # Session state for agent
 if "agent_state" not in st.session_state:
     st.session_state["agent_state"] = {
-        "mode": "idle",             # idle | create_proposed | delete_proposed | edit_proposed
+        "mode": "idle",  # idle | create_proposed | delete_proposed | edit_proposed
         "proposed_title": "",
         "proposed_content": "",
         "delete_candidates": [],
@@ -713,7 +780,8 @@ if "agent_state" not in st.session_state:
 # Intent regexes (DELETE first, then CREATE, then EDIT)
 DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
 CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
-EDIT_PAT   = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
+EDIT_PAT = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
+
 
 def classify_intent(msg: str) -> Tuple[str, Dict]:
     text = (msg or "").strip()
@@ -722,7 +790,6 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     mdm = DELETE_PAT.search(text)
     if mdm:
         target = mdm.group("target").strip().strip('"\'')
-
         target = target.rstrip(".")
         return "delete_wiki", {"query": target[:200] if target else ""}
 
@@ -745,12 +812,12 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     em = EDIT_PAT.search(text)
     if em:
         target = em.group("target").strip().strip('"\'')
-
         target = target.rstrip(".")
         return "edit_wiki", {"query": target[:200] if target else ""}
 
     # 4) Answer normally
     return "answer", {}
+
 
 def concise_title(title: str) -> str:
     t = (title or "Untitled").strip()
@@ -770,6 +837,7 @@ def concise_title(title: str) -> str:
     t = re.sub(r"\s*-\s*", " - ", t)
     return t
 
+
 # ---------- Safety filters ----------
 _BLOCK_PATTERNS = [
     r"\b(?:kill|suicide|self\-harm|cutting)\b",
@@ -781,6 +849,7 @@ _BLOCK_PATTERNS = [
 ]
 _BLOCK_RE = re.compile("|".join(_BLOCK_PATTERNS), re.I)
 
+
 def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
     if not title.strip():
         return False, "Title is empty."
@@ -790,8 +859,13 @@ def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
         return False, "Title or content appears to contain harmful or disallowed content."
     return True, ""
 
+
 def render_wiki_md_template(title: str, key_points: List[str]) -> str:
-    bullets = "\n".join(f"- {p}" for p in key_points) if key_points else "- Add specific behaviors and links to evidence."
+    bullets = (
+        "\n".join(f"- {p}" for p in key_points)
+        if key_points
+        else "- Add specific behaviors and links to evidence."
+    )
     tldr = (
         key_points[0]
         if key_points
@@ -821,17 +895,15 @@ def render_wiki_md_template(title: str, key_points: List[str]) -> str:
 (Synthesized from indexed documents.)
 """
 
+
 def _split_sentences_for_points(txt: str) -> List[str]:
     out = []
     for s in _split_sentences(txt or ""):
         s2 = s.strip()
-        if (
-            50 <= len(s2) <= 240
-            and re.match(r"^[A-Z0-9].*[\.!\?]$", s2)
-            and "http" not in s2
-        ):
+        if 50 <= len(s2) <= 240 and re.match(r"^[A-Z0-9].*[\.!\?]$", s2) and "http" not in s2:
             out.append(s2)
     return out
+
 
 def extract_key_points(
     query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5
@@ -858,6 +930,7 @@ def extract_key_points(
     if not any("time-box" in p.lower() or "time box" in p.lower() for p in out):
         out.insert(0, "Time-box feedback windows and collect input before the decision deadline.")
     return out[:max_points]
+
 
 # ---------- GPT-4 wiki drafting ----------
 def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:
@@ -906,6 +979,7 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
         except Exception:
             return None
 
+
 # ---------- Wiki actions ----------
 def agent_apply_create_wiki(title: str, content: str) -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
@@ -917,12 +991,14 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     res = incremental_add(content, created_path, progress=prog)
     return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
 
+
 def _is_in_wiki_folder(p: pathlib.Path) -> bool:
     try:
         p.resolve().relative_to(WIKI_DIR.resolve())
         return True
     except Exception:
         return False
+
 
 def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     deleted_paths: List[str] = []
@@ -940,6 +1016,7 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     prog = Prog("Refreshing index from cache…")
     _ = rebuild_from_cache(prog)
     return {"deleted": deleted_paths, "num_deleted": len(deleted_paths)}
+
 
 def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
     """Edit an existing wiki file, keeping it in the wiki folder, and refresh its vectors only."""
@@ -965,6 +1042,7 @@ def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
         "added_chunks": res_add.get("added_chunks", 0),
     }
 
+
 # ===== Agent tab =====
 with tab_agent:
     st.markdown("**Agent**")
@@ -986,7 +1064,7 @@ with tab_agent:
             "Goal or task",
             height=110,
             placeholder='Examples: create a wiki page "Values in Performance Reviews"; '
-                        'delete values.md; edit values.md; or just ask a question.',
+            'delete values.md; edit values.md; or just ask a question.',
             key="agent_msg",
         )
         submitted_run = st.form_submit_button("Run", type="primary")
@@ -1344,6 +1422,7 @@ def _list_md_files() -> List[Dict]:
             }
         )
     return out
+
 
 with tab_about:
     st.markdown("### How this works")

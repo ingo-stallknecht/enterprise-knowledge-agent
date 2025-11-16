@@ -17,7 +17,7 @@ from typing import List, Dict, Tuple, Optional
 
 import numpy as np
 import streamlit as st
-from dotenv import load_dotenv  # NEW
+from dotenv import load_dotenv
 
 # --------------------------------------------------
 # Load .env early so local OPENAI_API_KEY / USE_OPENAI are available
@@ -44,7 +44,8 @@ except Exception:
 def _secret(k: str, default=None):
     """
     Read from Streamlit secrets first (flat or nested), then environment.
-    This supports both:
+
+    Supports both:
       OPENAI_API_KEY = "..."
     and:
       [general]
@@ -65,67 +66,6 @@ def _secret(k: str, default=None):
     # 3) Fallback to environment
     return os.environ.get(k, default)
 
-
-def _init_openai_from_config() -> dict:
-    """
-    Load OpenAI config from Streamlit secrets / env.
-    - Does NOT overwrite OPENAI_API_KEY with an empty string.
-    - Returns a small diagnostic dict used for the header and backend.
-    """
-    use_flag_raw = _secret("USE_OPENAI", "true")
-    use_flag = str(use_flag_raw).strip().lower() == "true"
-
-    api_key = _secret("OPENAI_API_KEY", "").strip()
-    model = _secret("OPENAI_MODEL", "gpt-4o-mini").strip()
-    daily_usd = _secret("OPENAI_MAX_DAILY_USD", "0.80").strip()
-
-    has_key = bool(api_key)
-
-    # Only set env vars if we actually have a key
-    if use_flag and has_key:
-        os.environ["USE_OPENAI"] = "true"
-        os.environ["OPENAI_API_KEY"] = api_key
-        os.environ["OPENAI_MODEL"] = model
-        os.environ["OPENAI_MAX_DAILY_USD"] = daily_usd
-    else:
-        # Keep USE_OPENAI in sync but do NOT clobber an existing key with empty
-        os.environ["USE_OPENAI"] = "false"
-
-    return {
-        "use_flag": use_flag,
-        "has_key": has_key,
-        "model": model,
-        "daily_usd": daily_usd,
-    }
-
-
-_openai_cfg = _init_openai_from_config()
-
-
-def _openai_diag() -> str:
-    """Short, honest status line for the header."""
-    use_flag = _openai_cfg["use_flag"]
-    has_key = _openai_cfg["has_key"]
-    model = _openai_cfg["model"]
-
-    if use_flag and has_key:
-        return f"OpenAI backend: enabled · model {model}"
-    if use_flag and not has_key:
-        return "OpenAI backend: enabled · API key missing in secrets/env"
-    return "OpenAI backend: disabled"
-
-
-# ---------- Settings ----------
-TOP_K = int(_secret("EKA_TOP_K", "12"))
-MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
-RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
-USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
-DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
-AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
-USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
-
-# Optional read-only (no UI toggle, for demos)
-READ_ONLY = _secret("EKA_READ_ONLY", "false").lower() == "true"
 
 # ---------- Writable caches (Streamlit Cloud friendly) ----------
 WRITABLE_BASE = pathlib.Path(_secret("EKA_CACHE_DIR", "/mount/tmp")).expanduser()
@@ -157,6 +97,75 @@ os.environ.update(
         "XDG_CACHE_HOME": str(WRITABLE_BASE),
     }
 )
+
+# ---------- OpenAI config helpers ----------
+
+
+def _init_openai_from_config() -> dict:
+    """
+    Load OpenAI config from Streamlit secrets / env.
+
+    - Does NOT overwrite OPENAI_API_KEY with an empty string.
+    - Returns a small diagnostic dict used for the header and backend.
+    - Also syncs USE_OPENAI + OPENAI_MODEL + OPENAI_MAX_DAILY_USD into env when a key is present.
+    """
+    use_flag_raw = _secret("USE_OPENAI", "true")
+    use_flag = str(use_flag_raw).strip().lower() == "true"
+
+    api_key = _secret("OPENAI_API_KEY", "").strip()
+    model = _secret("OPENAI_MODEL", "gpt-4o-mini").strip()
+    daily_usd = _secret("OPENAI_MAX_DAILY_USD", "0.80").strip()
+
+    has_key = bool(api_key)
+
+    # Only set env vars if we actually have a key
+    if use_flag and has_key:
+        os.environ["USE_OPENAI"] = "true"
+        os.environ["OPENAI_API_KEY"] = api_key
+        os.environ["OPENAI_MODEL"] = model
+        os.environ["OPENAI_MAX_DAILY_USD"] = daily_usd
+    else:
+        # Keep USE_OPENAI in sync but do NOT clobber an existing key with empty
+        os.environ["USE_OPENAI"] = "false"
+
+    return {
+        "use_flag": use_flag,
+        "has_key": has_key,
+        "model": model,
+        "daily_usd": daily_usd,
+    }
+
+
+def _openai_diag() -> str:
+    """
+    Short, honest status line for the header.
+
+    IMPORTANT: this recomputes config at render time,
+    so Streamlit Cloud secrets are taken into account.
+    """
+    cfg = _init_openai_from_config()
+    use_flag = cfg["use_flag"]
+    has_key = cfg["has_key"]
+    model = cfg["model"]
+
+    if use_flag and has_key:
+        return f"OpenAI backend: enabled · model {model}"
+    if use_flag and not has_key:
+        return "OpenAI backend: enabled · API key missing in secrets/env"
+    return "OpenAI backend: disabled"
+
+
+# ---------- Settings ----------
+TOP_K = int(_secret("EKA_TOP_K", "12"))
+MAX_CHARS_DEFAULT = int(_secret("EKA_MAX_CHARS", "900"))
+RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
+USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
+DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
+AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
+USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
+
+# Optional read-only (no UI toggle, for demos)
+READ_ONLY = _secret("EKA_READ_ONLY", "false").lower() == "true"
 
 # ---------- PY path ----------
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -195,78 +204,10 @@ MANIFEST = INDEX_DIR / "vecs_manifest.json"
 for p in (VEC_DIR, RECS_DIR, MANIFEST.parent):
     p.mkdir(parents=True, exist_ok=True)
 
-# ---------- CSS / UI ----------
-st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="EKA", layout="wide")
-st.markdown(
-    """
- <style>
- .header-row {
-   display:flex;
-   align-items:center;
-   justify-content:space-between;
-   gap:12px;
- }
- .badge {
-   border-radius: 999px;
-   padding: 4px 10px;
-   font-size: 0.85rem;
-   border: 1px solid transparent;
- }
- .badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
- .badge-err { background:#FFF1F1; color:#B42318; border-color:#FECDCA; }
- .kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
- .small{font-size:0.92rem;color:#687076;}
- .cv-legend { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
- .cv-dot { width:10px; height:10px; display:inline-block; border-radius:999px; border:1px solid #d1d5db; }
- .cv-b1 { background:#FEE2E2; }
- .cv-b2 { background:#FEF9C3; }
- .cv-b3 { background:#ECFEFF; }
- .cv-b4 { background:#F0FDF4; }
- .cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px;
-            border-radius:999px; border:1px solid #e5e7eb; font-size: 0.95rem; }
- </style>
- """,
-    unsafe_allow_html=True,
-)
 
-# ---------- Index health helper ----------
-def _index_health() -> Tuple[str, str]:
-    try:
-        idx = load_or_init_index()
-        ok = (idx.size() > 0) if hasattr(idx, "size") else True
-        if ok:
-            return "<span class='badge badge-ok'>Online</span>", "ok"
-        return "<span class='badge badge-err'>Empty</span>", "err"
-    except Exception:
-        return "<span class='badge badge-err'>Offline</span>", "err"
+# ---------- Progress helper ----------
 
 
-# Render header (uses _openai_diag, same logic locally & in the cloud)
-st.markdown(
-    f"""
-    <div class='header-row'>
-        <div>
-            <h3>Enterprise Knowledge Agent</h3>
-            <div class='small'>
-                Ask in plain language. Agent plans, retrieves, answers, cites.
-                &nbsp; {_openai_diag()}
-            </div>
-        </div>
-        <div id='status-slot'></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# Status slot is filled after index/bootstrapping, so it reflects "Online" correctly
-_status_slot = st.empty()
-_status_slot.markdown(
-    "<div style='display:flex; justify-content:flex-end'>"
-    "<span class='badge badge-err'>Checking index…</span></div>",
-    unsafe_allow_html=True,
-)
-
-# ---------- Progress ----------
 class Prog:
     """
     Lightweight progress helper that auto-hides itself when done.
@@ -702,8 +643,79 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
 
-# Initial bootstrap / index build on first cloud load.
-# After this, we update the header status slot so it shows "Online" without manual refresh.
+# ---------- Index health helper ----------
+def _index_health() -> Tuple[str, str]:
+    try:
+        idx = load_or_init_index()
+        ok = (idx.size() > 0) if hasattr(idx, "size") else True
+        if ok:
+            return "<span class='badge badge-ok'>Online</span>", "ok"
+        return "<span class='badge badge-err'>Empty</span>", "err"
+    except Exception:
+        return "<span class='badge badge-err'>Offline</span>", "err"
+
+
+# ---------- CSS / UI ----------
+st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="EKA", layout="wide")
+st.markdown(
+    """
+ <style>
+ .header-row {
+   display:flex;
+   align-items:center;
+   justify-content:space-between;
+   gap:12px;
+ }
+ .badge {
+   border-radius: 999px;
+   padding: 4px 10px;
+   font-size: 0.85rem;
+   border: 1px solid transparent;
+ }
+ .badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
+ .badge-err { background:#FFF1F1; color:#B42318; border-color:#FECDCA; }
+ .kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
+ .small{font-size:0.92rem;color:#687076;}
+ .cv-legend { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
+ .cv-dot { width:10px; height:10px; display:inline-block; border-radius:999px; border:1px solid #d1d5db; }
+ .cv-b1 { background:#FEE2E2; }
+ .cv-b2 { background:#FEF9C3; }
+ .cv-b3 { background:#ECFEFF; }
+ .cv-b4 { background:#F0FDF4; }
+ .cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px;
+            border-radius:999px; border:1px solid #e5e7eb; font-size: 0.95rem; }
+ </style>
+ """,
+    unsafe_allow_html=True,
+)
+
+# ---------- Header with OpenAI + index status ----------
+openai_status_text = _openai_diag()
+
+st.markdown(
+    f"""
+    <div class='header-row'>
+        <div>
+            <h3>Enterprise Knowledge Agent</h3>
+            <div class='small'>
+                Ask in plain language. Agent plans, retrieves, answers, cites.
+                &nbsp; <b>{openai_status_text}</b>
+            </div>
+        </div>
+        <div id='status-slot'></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+# Status slot is filled after index/bootstrapping, so it reflects "Online" correctly
+_status_slot = st.empty()
+_status_slot.markdown(
+    "<div style='display:flex; justify-content:flex-end'>"
+    "<span class='badge badge-err'>Checking index…</span></div>",
+    unsafe_allow_html=True,
+)
+
+# ---------- Initial bootstrap / index build ----------
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
         if AUTO_BOOTSTRAP and not have_any_markdown():
@@ -720,15 +732,15 @@ _status_slot.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Global explanation above tabs ----------
+# ---------- Short explanation above tabs ----------
 st.markdown(
     """
-**What you can do here**
+**What this app can do**
 
-- **Ask** – Ask questions over the GitLab-inspired handbook + wiki pages + your uploads.  
-- **Agent** – Let the agent create, delete, or edit wiki pages (always with confirmation), or just answer.  
-- **Upload** – Add your own `.md` / `.txt` files to the knowledge base.  
-- **About** – See how it works and inspect which Markdown files are in the current corpus.
+- **Ask tab** – plain-language questions over the handbook + wiki, with citations and a context visualizer.  
+- **Agent tab** – higher-level tasks: create, delete, or edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer normally.  
+- **Upload tab** – add your own `.md`/`.txt` files into the wiki corpus; they’ll be retrieved and cited like the handbook.  
+- **About tab** – see how the system works under the hood and inspect the current Markdown corpus.
 """
 )
 
@@ -924,7 +936,7 @@ _BLOCK_PATTERNS = [
     r"\b(?:porn|explicit\s*sexual|bestiality)\b",
     r"(?:\b(?:fuck|cunt|nigger|fag|retard)\b)",
 ]
-_RED_FLAGS = re.compile("|".join(_BLOCK_PATTERNS), re.I)
+_BLOCK_RE = re.compile("|".join(_BLOCK_PATTERNS), re.I)
 
 
 def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
@@ -932,7 +944,7 @@ def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
         return False, "Title is empty."
     if len(title) > 120:
         return False, "Title too long."
-    if _RED_FLAGS.search(title) or _RED_FLAGS.search(content or ""):
+    if _BLOCK_RE.search(title) or _BLOCK_RE.search(content or ""):
         return False, "Title or content appears to contain harmful or disallowed content."
     return True, ""
 
@@ -1015,10 +1027,13 @@ def _have_openai_client() -> bool:
 
     - Prefer OPENAI_API_KEY from st.secrets.
     - Fall back to environment variable if needed.
+    - Do NOT depend on USE_OPENAI; if you want to
+      disable OpenAI, unset the key instead.
     """
     if _OpenAI is None:
         return False
 
+    # 1) Secrets first
     key = ""
     try:
         key = st.secrets["OPENAI_API_KEY"]
@@ -1029,6 +1044,7 @@ def _have_openai_client() -> bool:
     if not key:
         return False
 
+    # Ensure the env var is set for the OpenAI client
     os.environ["OPENAI_API_KEY"] = key
     return True
 
@@ -1274,8 +1290,6 @@ with tab_agent:
                             {
                                 "mode": "edit_proposed",
                                 "edit_candidates": [],
-
-
                                 "edit_selected": "",
                                 "edit_original": "",
                                 "delete_candidates": [],

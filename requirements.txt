@@ -8,7 +8,8 @@ streamlit==1.38.0
 numpy==1.26.4
 
 # Embeddings / models
-sentence-transformers==2.2.2  # stable & lighter than 3.x
+sentence-transformers==2.2.2
+huggingface-hub==0.25.2
 
 # App / utilities
 markdownify==0.14.1

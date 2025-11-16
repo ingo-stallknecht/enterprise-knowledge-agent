@@ -10,11 +10,7 @@ try:
 except Exception:
     st = None
 
-try:
-    # New OpenAI client (>=1.0)
-    from openai import OpenAI as _OpenAI
-except Exception:
-    _OpenAI = None
+import requests
 
 
 # -------------------------------------------------------------------
@@ -78,16 +74,12 @@ def _hydrate_openai_env_from_secrets() -> None:
 
 def _openai_enabled() -> bool:
     """
-    Check if we should attempt to use OpenAI.
+    Check if we should attempt to use OpenAI (via raw HTTP).
 
     Conditions:
     - USE_OPENAI=true (after hydration)
     - OPENAI_API_KEY non-empty
-    - openai client import succeeded
     """
-    if _OpenAI is None:
-        return False
-
     _hydrate_openai_env_from_secrets()
 
     if os.environ.get("USE_OPENAI", "false").lower() != "true":
@@ -125,7 +117,13 @@ def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _extractive_fallback(recs: List[Dict], question: str, max_chars: int, reason: str, error: str = "") -> Tuple[str, Dict]:
+def _extractive_fallback(
+    recs: List[Dict],
+    question: str,
+    max_chars: int,
+    reason: str,
+    error: str = "",
+) -> Tuple[str, Dict]:
     """
     Simple extractive answer: stitch together the most relevant chunks.
     Also records why we fell back (for debugging).
@@ -136,7 +134,7 @@ def _extractive_fallback(recs: List[Dict], question: str, max_chars: int, reason
     else:
         ans = joined[:max_chars]
 
-    meta = {
+    meta: Dict[str, object] = {
         "llm": "extractive",
         "used_openai": False,
         "reason": reason,
@@ -177,15 +175,13 @@ def generate_answer(
 
     # Try OpenAI if enabled
     if _openai_enabled():
+        key = os.environ.get("OPENAI_API_KEY", "").strip()
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))
+        # Very rough: chars ≈ 3 tokens
+        max_tokens = min(900, max(200, max_chars // 3))
+
         try:
-            # Create client from env
-            client = _OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
-
-            model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-            temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))
-            # Very rough: chars ≈ 3 tokens
-            max_tokens = min(900, max(200, max_chars // 3))
-
             context = _build_context(recs, max_chars=6000)
 
             system_msg = (
@@ -209,31 +205,54 @@ def generate_answer(
                 """
             ).strip()
 
-            resp = client.chat.completions.create(
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                messages=[
+            payload = {
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": [
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg},
                 ],
-            )
+            }
 
-            text = (resp.choices[0].message.content or "").strip()
-            if not text:
-                # Unexpected empty answer → fallback
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            choices = data.get("choices", [])
+            if not choices:
                 return _extractive_fallback(
                     recs,
                     question,
                     max_chars,
-                    reason="openai_empty_response",
+                    reason="openai_empty_choices",
+                    error=str(data),
+                )
+
+            message = choices[0].get("message", {}) or {}
+            text = (message.get("content") or "").strip()
+            if not text:
+                return _extractive_fallback(
+                    recs,
+                    question,
+                    max_chars,
+                    reason="openai_empty_message",
+                    error=str(data),
                 )
 
             # Hard character trim
             if len(text) > max_chars:
                 text = text[: max_chars - 3].rstrip() + "..."
 
-            meta = {
+            meta: Dict[str, object] = {
                 "llm": model,
                 "used_openai": True,
                 "reason": "openai_success",
@@ -250,7 +269,7 @@ def generate_answer(
                 error=str(e),
             )
 
-    # OpenAI disabled / not available
+    # OpenAI disabled / no key
     return _extractive_fallback(
         recs,
         question,

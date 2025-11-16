@@ -583,28 +583,54 @@ CURATED = [
 
 
 def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
+    """
+    Download a small curated subset of the GitLab Handbook and convert to Markdown.
+
+    Progress bar behavior:
+    - Goes smoothly from 0 → 100% over the fetch loop.
+    - Ends at 100% ("Fetched X/Y pages") so it doesn't look stuck.
+    """
     if requests is None or md is None:
+        if progress:
+            progress.update(label="requests/markdownify not available", value=1.0)
         return {"ok": False, "error": "requests/markdownify not available"}
+
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PROC_DIR.mkdir(parents=True, exist_ok=True)
-    total, ok = len(CURATED), 0
+
+    total = len(CURATED)
+    ok = 0
+
     for i, url in enumerate(CURATED, 1):
         try:
+            frac = i / total
             if progress:
                 progress.update(
-                    label=f"Fetching {i}/{total}: {url}", value=min(0.15, i / total * 0.15)
+                    label=f"Fetching {i}/{total}: {url}",
+                    value=min(0.95, frac),  # smoothly up to 95%
                 )
+
             r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
             r.raise_for_status()
             html = r.text
             slug = url.rstrip("/").split("/")[-1] or "index"
+
             (RAW_DIR / f"{slug}.html").write_text(html, encoding="utf-8")
             (PROC_DIR / f"{slug}.md").write_text(md(html), encoding="utf-8")
+
             ok += 1
             time.sleep(0.02)
         except Exception:
-            pass
-    return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
+            # Ignore individual failures and keep going
+            continue
+
+    if progress:
+        # Make sure the bar visibly finishes and then auto-hides via Prog
+        label = f"Fetched {ok}/{total} handbook pages"
+        progress.update(label=label, value=1.0)
+
+    return {"ok": ok > 0, "downloaded": ok, "total": total}
+
 
 
 def corpus_stats() -> Dict:

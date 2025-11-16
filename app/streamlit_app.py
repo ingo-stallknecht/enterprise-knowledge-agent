@@ -137,7 +137,7 @@ def _openai_diag() -> str:
     if use and key:
         return f"OpenAI: ON (key ✓, model {model})"
     if use and not key:
-        return "OpenAI: ON (key missing ⚠)"
+        return "OpenAI: ON (key missing)"
     return "OpenAI: OFF"
 
 
@@ -586,13 +586,36 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
 
+# Determine OpenAI status cleanly — no emojis, no warnings
+use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
+has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+has_key_secret = bool(
+    st and "OPENAI_API_KEY" in getattr(st, "secrets", {})
+)
+
+if use_flag and (has_key_env or has_key_secret):
+    openai_status = "<span class='badge badge-ok'>ON</span>"
+else:
+    openai_status = "<span class='badge badge-err'>OFF</span>"
+
+
+# Render header
 st.markdown(
-    "<div class='header-row'>"
-    "<div><h3>Enterprise Knowledge Agent</h3>"
-    f"<div class='small'>Ask in plain language. Agent plans, retrieves, answers, cites. {_openai_diag()}</div></div>"
-    "<div id='status-slot'></div></div>",
+    f"""
+    <div class='header-row'>
+        <div>
+            <h3>Enterprise Knowledge Agent</h3>
+            <div class='small'>
+                Ask in plain language. Agent plans, retrieves, answers, cites.
+                &nbsp; <b>OpenAI:</b> {openai_status}
+            </div>
+        </div>
+        <div id='status-slot'></div>
+    </div>
+    """,
     unsafe_allow_html=True,
 )
+
 _status_slot = st.empty()
 badge_html, _ = _index_health()
 _status_slot.markdown(
@@ -600,28 +623,6 @@ _status_slot.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Orientation text for new users ----------
-st.markdown(
-    """
-> **How to use this app**
->
-> - **Ask** - Ask natural-language questions. The app searches a GitLab-inspired handbook plus your wiki pages  
->   and answers strictly from those documents with citations and a context visualizer.
-> - **Agent** - Describe a task. The agent can  
->   1) propose and create wiki pages  
->   2) delete pages (only inside `data/processed/wiki/`)  
->   3) edit existing wiki pages  
->   4) answer normally with no side effects  
->
-> **All create/delete/edit actions require your confirmation.**
->
-> - **Upload** - Add your own `.md` / `.txt` files; they become part of the knowledge base and show up in answers.
-> - **About** - See an overview of how the system works and browse the Markdown documents that are currently indexed.
->
-> The initial corpus is based on a small subset of the public GitLab Handbook  
-> (<https://about.gitlab.com/handbook/>), plus any wiki pages and uploads you add here.
-"""
-)
 
 # ---------- Bootstrap (optional) ----------
 CURATED = [

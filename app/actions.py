@@ -1,32 +1,56 @@
 # app/actions.py
-import os, pathlib, sqlite3, datetime
-from slugify import slugify as _slugify
+"""
+Simple file-based wiki actions used by tests and scripts.
+
+In the current Streamlit-only setup the UI uses its own helper functions,
+but these actions are still useful for a minimal programmatic API and tests.
+"""
+
+from pathlib import Path
+from typing import Dict
+
+from slugify import slugify
+
+WIKI_ROOT = Path("data/processed/wiki")
 
 
-def slugify(title: str):
-return _slugify(title, lowercase=True, separator="-")
+def _ensure_wiki_root() -> Path:
+    WIKI_ROOT.mkdir(parents=True, exist_ok=True)
+    return WIKI_ROOT
 
 
-WIKI_DIR = pathlib.Path("data/processed/wiki"); WIKI_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = pathlib.Path("data/tickets.db"); DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _slugify(title: str) -> str:
+    """Slugify a page title into a safe filename (without extension)."""
+    base = title or "page"
+    return slugify(base, lowercase=True, separator="-")
 
 
-# ensure sqlite table
-conn = sqlite3.connect(DB_PATH)
-with conn:
-conn.execute("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, body TEXT, priority TEXT, created_at TEXT)")
-conn.close()
+def upsert_wiki_page(title: str, content: str) -> Dict[str, str]:
+    """
+    Create or overwrite a wiki page under data/processed/wiki.
+
+    Returns metadata with title, slug, and path.
+    """
+    root = _ensure_wiki_root()
+    slug = _slugify(title)
+    path = root / f"{slug}.md"
+    path.write_text(content, encoding="utf-8")
+    return {
+        "title": title,
+        "slug": slug,
+        "path": str(path),
+    }
 
 
-def upsert_wiki_page(title: str, content: str):
-fp = WIKI_DIR / f"{slugify(title)}.md"
-fp.write_text(f"# {title}\n\n{content}\n", encoding="utf-8")
-return {"status": "ok", "path": str(fp)}
+def delete_wiki_page(slug: str) -> bool:
+    """
+    Delete a wiki page by slug (without extension).
 
-
-def create_ticket(title: str, body: str, priority: str = "medium"):
-conn = sqlite3.connect(DB_PATH)
-with conn:
-conn.execute("INSERT INTO tickets (title, body, priority, created_at) VALUES (?,?,?,?)",
-(title, body, priority, datetime.datetime.utcnow().isoformat()+"Z"))
-return {"status": "ok", "id": conn.execute("select last_insert_rowid()").fetchone()[0]}
+    Returns True if the file existed and was removed, False otherwise.
+    """
+    root = _ensure_wiki_root()
+    path = root / f"{slug}.md"
+    if not path.exists():
+        return False
+    path.unlink()
+    return True

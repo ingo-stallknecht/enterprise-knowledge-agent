@@ -16,6 +16,7 @@ except Exception:
 # Helpers: pull config from env + secrets (no magic)
 # -------------------------------------------------------------------
 
+
 def _get_use_openai_flag() -> bool:
     """
     Decide whether to attempt OpenAI usage.
@@ -148,6 +149,7 @@ def _get_max_output_tokens(default_chars: int) -> int:
 # Context building & extractive fallback
 # -------------------------------------------------------------------
 
+
 def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
     parts: List[str] = []
     total = 0
@@ -191,6 +193,7 @@ def _extractive_fallback(
 # -------------------------------------------------------------------
 # Main entry point
 # -------------------------------------------------------------------
+
 
 def generate_answer(
     recs: List[Dict],

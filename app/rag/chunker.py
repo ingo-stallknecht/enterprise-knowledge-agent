@@ -2,6 +2,7 @@
 import re
 from typing import List, Dict
 
+
 def split_markdown(
     text: str,
     max_chars: int = 1200,

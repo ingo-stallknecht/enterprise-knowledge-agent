@@ -15,6 +15,7 @@
 import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
 
+import numpy as np
 import streamlit as st
 from dotenv import load_dotenv  # NEW
 
@@ -78,6 +79,7 @@ os.environ.update(
     }
 )
 
+
 # ---------- OpenAI / LLM ----------
 def _find_secret_key() -> str:
     candidates = [
@@ -111,8 +113,7 @@ def _find_secret_key() -> str:
 
 # Use st.secrets.USE_OPENAI if present, else env, else "true"
 use_openai_flag = (
-    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower()
-    == "true"
+    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower() == "true"
 )
 os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
 
@@ -210,6 +211,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ---------- Progress ----------
 class Prog:
     """
@@ -221,6 +223,7 @@ class Prog:
         ...
         prog.update(label="Done", value=1.0)  # bar disappears shortly after
     """
+
     def __init__(self, initial_text: str = "Working…"):
         # Use a container slot so we can later clear the progress bar completely
         self._slot = st.empty()
@@ -324,7 +327,6 @@ def save_manifest(m: Dict[str, Dict]) -> None:
 
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
-    import numpy as np
 
     h = _hash_source(source)
     vpath = VEC_DIR / f"{h}.npy"
@@ -355,7 +357,6 @@ def remove_cache_for_sources(sources: List[str]) -> List[str]:
 
 
 def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
-    import numpy as np
 
     m = load_manifest()
     if not m:
@@ -383,7 +384,9 @@ def get_models():
     rer = None
     if not DISABLE_RERANKER_BOOT:
         try:
-            rer = Reranker(CFG.get("reranker", {}).get("model", "cross-encoder/ms-marco-MiniLM-L-6-v2"))
+            rer = Reranker(
+                CFG.get("reranker", {}).get("model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+            )
         except Exception:
             rer = None
     return emb, rer
@@ -404,7 +407,6 @@ def save_index(X, records, progress: Optional[Prog] = None) -> None:
 
 
 def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
-    import numpy as np
 
     if progress:
         progress.update(label="Loading cached vectors…", value=0.1)
@@ -421,7 +423,6 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     files = _scan_processed_files()
     if progress:
         progress.update(label=f"Scanning… {len(files)} files", value=0.03)
-    import numpy as np
 
     emb, _ = get_models()
     all_vecs, all_recs = [], []
@@ -437,12 +438,12 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
             save_cache_for_source(str(fp).replace("\\", "/"), V, recs)
         if progress:
             progress.update(
-                label=f"Embedding {i}/{len(files)} files…", value=0.05 + 0.80 * (i / max(1, len(files)))
+                label=f"Embedding {i}/{len(files)} files…",
+                value=0.05 + 0.80 * (i / max(1, len(files))),
             )
     if all_vecs:
         X = np.vstack(all_vecs)
     else:
-        import numpy as np
 
         X = np.zeros((0, 384), dtype="float32")
     save_index(X, all_recs, progress)
@@ -539,7 +540,6 @@ def attribute(answer: str, records: List[Dict]) -> List[dict]:
         return []
     svecs = emb.encode(sents)
     rvecs = emb.encode([(r.get("text") or "") for r in records])
-    import numpy as np
 
     sim = (svecs @ rvecs.T).astype(float)
     out = []
@@ -620,7 +620,6 @@ _status_slot.markdown(
     f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
     unsafe_allow_html=True,
 )
-
 
 
 # ---------- Bootstrap (optional) ----------
@@ -742,7 +741,11 @@ with tab_ask:
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
                 joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
+                ans = (
+                    joined[:max_chars]
+                    if joined
+                    else "No relevant context found in the current corpus."
+                )
             st.subheader("Answer")
             st.write(ans)
             m1, m2, m3, m4 = st.columns(4)
@@ -762,7 +765,7 @@ with tab_ask:
                 f"<div class='kpi'>LLM: <b>{llm_meta.get('llm','extractive')}</b></div>",
                 unsafe_allow_html=True,
             )
-            
+
             # Debug / transparency for which backend was used
             debug_reason = llm_meta.get("reason", "")
             debug_error = llm_meta.get("error", "")
@@ -799,9 +802,7 @@ with tab_ask:
                 src = row.get("best_source", "")
                 rk = row.get("best_rank", "-")
                 title = f"Top source #{rk}\n{src}\n(score {s:.2f})"
-                pills.append(
-                    f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>"
-                )
+                pills.append(f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>")
             st.markdown("".join(pills), unsafe_allow_html=True)
             st.markdown("#### Sources")
             for c in fmt_citations(pairs, TOP_K):
@@ -837,7 +838,7 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     # 1) Delete
     mdm = DELETE_PAT.search(text)
     if mdm:
-        target = mdm.group("target").strip().strip('"\'')
+        target = mdm.group("target").strip().strip("\"'")
         target = target.rstrip(".")
         return "delete_wiki", {"query": target[:200] if target else ""}
 
@@ -859,7 +860,7 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
     # 3) Edit
     em = EDIT_PAT.search(text)
     if em:
-        target = em.group("target").strip().strip('"\'')
+        target = em.group("target").strip().strip("\"'")
         target = target.rstrip(".")
         return "edit_wiki", {"query": target[:200] if target else ""}
 
@@ -965,7 +966,6 @@ def extract_key_points(
     if not cands:
         return []
     sv = emb.encode(cands)
-    import numpy as np
 
     sim = (sv @ qv.T).reshape(-1)
     idxs = np.argsort(-sim)[: max(10, max_points * 3)]
@@ -981,6 +981,7 @@ def extract_key_points(
 
 
 # ---------- GPT-4 wiki drafting ----------
+
 
 def _have_openai_client() -> bool:
     """
@@ -1057,7 +1058,6 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
     except Exception:
         # Any error: signal caller to fall back to the static template
         return None
-
 
 
 # ---------- Wiki actions ----------
@@ -1143,8 +1143,8 @@ with tab_agent:
         msg = st.text_area(
             "Goal or task",
             height=110,
-            placeholder='Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear bullet points.; '
-            'delete demo-page.md; edit demo-page.md; or just ask a question.',
+            placeholder="Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear bullet points.; "
+            "delete demo-page.md; edit demo-page.md; or just ask a question.",
             key="agent_msg",
         )
         submitted_run = st.form_submit_button("Run", type="primary")
@@ -1269,7 +1269,11 @@ with tab_agent:
                 ans, llm_meta = generate_answer(recs, text, max_chars=900)
                 if not ans or ans.strip() in {".", ""}:
                     joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                    ans = joined[:900] if joined else "No relevant context found in the current corpus."
+                    ans = (
+                        joined[:900]
+                        if joined
+                        else "No relevant context found in the current corpus."
+                    )
                 state.update(
                     {
                         "mode": "idle",
@@ -1388,9 +1392,11 @@ with tab_agent:
                 file_choice = st.selectbox(
                     "Select file to edit (restricted to data/processed/wiki/)",
                     options=state["edit_candidates"],
-                    index=max(0, state["edit_candidates"].index(state["edit_selected"]))
-                    if state["edit_selected"] in state["edit_candidates"]
-                    else 0,
+                    index=(
+                        max(0, state["edit_candidates"].index(state["edit_selected"]))
+                        if state["edit_selected"] in state["edit_candidates"]
+                        else 0
+                    ),
                 )
                 # Load content if changed
                 if file_choice != state["edit_selected"] or not state["edit_original"]:
@@ -1466,9 +1472,8 @@ with tab_upload:
             if res.get("appended", False):
                 st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
             else:
-                st.success(
-                    f"✅ Refreshed index from cache; added {res['added_chunks']} chunks."
-                )
+                st.success(f"✅ Refreshed index from cache; added {res['added_chunks']} chunks.")
+
 
 # ===== ABOUT =====
 def _list_md_files() -> List[Dict]:

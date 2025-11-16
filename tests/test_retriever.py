@@ -1,11 +1,12 @@
 # tests/test_retriever.py
-import pathlib, yaml
 from app.rag.retriever import Retriever
 
 
-def test_retriever_loads():
-cfg = yaml.safe_load(open("configs/settings.yaml"))
-# requires index to exist (run make index once for CI demo)
-r = Retriever(cfg["retrieval"]["embedder_model"], cfg["retrieval"]["normalize"], cfg["retrieval"]["faiss_index"], cfg["retrieval"]["store_json"])
-res = r.retrieve("values", k=2)
-assert isinstance(res, list)
+def test_dense_returns_at_most_k():
+    docs = [{"text": f"doc-{i}", "source": f"src-{i}"} for i in range(10)]
+    r = Retriever(docs)
+
+    out = r.dense("any query", k=3)
+    assert len(out) == 3
+    assert out[0]["text"] == "doc-0"
+    assert out[1]["source"] == "src-1"

@@ -11,7 +11,7 @@
 
 ## Overview
 
-The **Enterprise Knowledge Agent (EKA)** is a Retrieval-Augmented Generation (RAG) and knowledge-editing system.  
+The **Enterprise Knowledge Agent (EKA)** is a Retrieval-Augmented Generation (RAG) and knowledge-editing system.
 It ingests Markdown documents, builds semantic search using embeddings and FAISS, answers questions with citations, and provides safe tools to create or edit internal wiki pages.
 
 The system runs:
@@ -25,18 +25,18 @@ The system uses the structure and writing style of the publicly available [GitLa
 
 ---
 
-## UI Preview  
-![UI Overview](assets/UI.png) 
+## UI Preview
+![UI Overview](assets/UI.png)
 
 ---
 
 ## Retrieval-Augmented Q&A
 
-- Embeds questions using MiniLM  
-- Retrieves relevant chunks using FAISS  
-- Optional reranking  
-- Answers via GPT-4o (if available) or extractive fallback  
-- Includes sentence-to-source attribution and expandable citation previews  
+- Embeds questions using MiniLM
+- Retrieves relevant chunks using FAISS
+- Optional reranking
+- Answers via GPT-4o (if available) or extractive fallback
+- Includes sentence-to-source attribution and expandable citation previews
 
 ![Ask Tab](assets/ask_tab.png)
 
@@ -46,17 +46,17 @@ The system uses the structure and writing style of the publicly available [GitLa
 
 The Agent can:
 
-1. Create new wiki pages  
-2. Edit existing pages  
-3. Delete pages  
-4. Answer normally when no action is intended  
+1. Create new wiki pages
+2. Edit existing pages
+3. Delete pages
+4. Answer normally when no action is intended
 
 Safeguards:
 
-- All changes require confirmation  
-- All edits restricted to `data/processed/wiki/`  
-- Harmful content and unsafe titles are blocked  
-- Index updates incrementally  
+- All changes require confirmation
+- All edits restricted to `data/processed/wiki/`
+- Harmful content and unsafe titles are blocked
+- Index updates incrementally
 
 ![Agent Tab](assets/agent_tab.png)
 
@@ -66,9 +66,9 @@ Safeguards:
 
 The system maintains a vector cache that enables:
 
-- Fast re-embedding of only changed files  
-- Efficient deletion of vectors  
-- Lightweight rebuilds of the FAISS index  
+- Fast re-embedding of only changed files
+- Efficient deletion of vectors
+- Lightweight rebuilds of the FAISS index
 - Support for prebuilt indexes for instant cold starts
 
 ---
@@ -102,10 +102,10 @@ Else:
 
 The DAG `airflow/dags/weekly_ingest_and_train.py` automates:
 
-- Fetching new GitLab Handbook pages  
-- Rebuilding the index  
-- Evaluating retrieval quality  
-- Promoting or rolling back based on metrics  
+- Fetching new GitLab Handbook pages
+- Rebuilding the index
+- Evaluating retrieval quality
+- Promoting or rolling back based on metrics
 
 ## Enabling GPT Locally (Optional)
 

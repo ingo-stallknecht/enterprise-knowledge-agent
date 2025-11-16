@@ -1,0 +1,10 @@
+[flake8]
+# Black-compatible setup
+max-line-length = 160
+
+# Ignore rules that conflict with black or that we consciously relax:
+# - E203, W503: known conflicts with black's formatting
+# - E501: line length (we trust max-line-length + black)
+# - E401, E402: multiple imports on one line / import position
+# - E741: ambiguous variable name (e.g. I, l, O) – allowed in legacy / math-ish code
+extend-ignore = E203, W503, E501, E401, E402, E741

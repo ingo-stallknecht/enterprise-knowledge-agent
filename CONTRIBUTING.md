@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to **Enterprise Knowledge Agent**.  
+Thank you for your interest in contributing to **Enterprise Knowledge Agent**.
 This guide is intentionally short and compact.
 
 ## Setup

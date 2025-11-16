@@ -9,6 +9,7 @@ except Exception:
 
 class Reranker:
     """Cross-encoder reranker. Falls back to a simple heuristic if model unavailable."""
+
     def __init__(self, model_name: str):
         self.model_name = model_name
         self.model = None
@@ -19,17 +20,16 @@ class Reranker:
             except Exception:
                 self.model = None
 
-    def rerank(self, query: str, candidates: List[Dict], top_k: int = 6) -> List[Tuple[Dict, float]]:
+    def rerank(
+        self, query: str, candidates: List[Dict], top_k: int = 6
+    ) -> List[Tuple[Dict, float]]:
         if not candidates:
             return []
 
         # Fallback heuristic when CrossEncoder isn't available:
         if not self.model:
             # score ~ normalized length up to 1000 chars (simple, deterministic)
-            scored = [
-                (c, float(min(len(c.get("text") or ""), 1000)) / 1000.0)
-                for c in candidates
-            ]
+            scored = [(c, float(min(len(c.get("text") or ""), 1000)) / 1000.0) for c in candidates]
             scored.sort(key=lambda x: x[1], reverse=True)
             return scored[:top_k]
 

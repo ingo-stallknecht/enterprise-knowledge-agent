@@ -8,8 +8,10 @@ Skips gated pages (e.g., culture/ → sign-in).
 import time, pathlib, requests
 from markdownify import markdownify as md
 
-RAW = pathlib.Path("data/raw"); RAW.mkdir(parents=True, exist_ok=True)
-PROC = pathlib.Path("data/processed"); PROC.mkdir(parents=True, exist_ok=True)
+RAW = pathlib.Path("data/raw")
+RAW.mkdir(parents=True, exist_ok=True)
+PROC = pathlib.Path("data/processed")
+PROC.mkdir(parents=True, exist_ok=True)
 
 HEADERS = {"User-Agent": "EKA-Ingest/1.0"}
 CURATED = [
@@ -26,9 +28,11 @@ CURATED = [
     "https://about.gitlab.com/handbook/engineering/management/",
 ]
 
+
 def slug(url: str) -> str:
     s = url.split("https://about.gitlab.com/handbook/")[-1].strip("/")
     return (s or "index").replace("/", "-")
+
 
 def fetch(url: str) -> str:
     r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
@@ -37,6 +41,7 @@ def fetch(url: str) -> str:
     if "gitlab.com/users/sign_in" in r.url:
         raise requests.HTTPError(f"Gated page redirected to sign-in: {r.url}")
     return r.text
+
 
 def main():
     ok = 0
@@ -51,6 +56,7 @@ def main():
         except Exception as e:
             print(f"[{i}/{len(CURATED)}] skip: {url} -> {e}")
     print(f"[done] downloaded {ok} pages")
+
 
 if __name__ == "__main__":
     main()

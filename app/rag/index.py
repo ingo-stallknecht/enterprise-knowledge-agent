@@ -8,6 +8,7 @@ import numpy as np
 # Try to import FAISS; fall back to pure NumPy if not available
 try:
     import faiss  # type: ignore
+
     _FAISS_AVAILABLE = True
 except Exception:  # pragma: no cover - cloud may not have faiss
     faiss = None
@@ -169,9 +170,7 @@ class DocIndex:
                     self._vecs = new_vecs
                     self.records = []
             # Extend vectors by vertical stacking
-            self._vecs = (
-                new_vecs if self._vecs is None else np.vstack([self._vecs, new_vecs])
-            )
+            self._vecs = new_vecs if self._vecs is None else np.vstack([self._vecs, new_vecs])
 
         self.records.extend(new_records)
         self._persist()

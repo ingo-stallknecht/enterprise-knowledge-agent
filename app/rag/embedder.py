@@ -21,11 +21,7 @@ class Embedder:
         self.normalize = normalize
 
         # Decide where to cache models (keeps Streamlit Cloud happy)
-        cache_dir = (
-            os.environ.get("HF_HOME")
-            or os.environ.get("TRANSFORMERS_CACHE")
-            or None
-        )
+        cache_dir = os.environ.get("HF_HOME") or os.environ.get("TRANSFORMERS_CACHE") or None
 
         # Build kwargs in a version-safe way
         extra_kwargs = {}

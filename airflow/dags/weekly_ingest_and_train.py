@@ -83,9 +83,7 @@ with DAG(
     # 4) Promote or rollback based on evaluation thresholds
     promote = BashOperator(
         task_id="promote",
-        bash_command=(
-            f"cd {REPO} && {PY} scripts/promote_or_rollback.py --mode promote"
-        ),
+        bash_command=(f"cd {REPO} && {PY} scripts/promote_or_rollback.py --mode promote"),
         env={"PYTHONPATH": REPO, **os.environ},
     )
 

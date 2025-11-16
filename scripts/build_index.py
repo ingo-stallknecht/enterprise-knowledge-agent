@@ -1,5 +1,4 @@
 # scripts/build_index.py
-import json
 import pathlib
 from glob import glob
 from typing import Callable, Dict, Optional, List
@@ -8,6 +7,7 @@ from app.rag.chunker import split_markdown
 from app.rag.embedder import Embedder
 from app.rag.index import DocIndex
 from app.rag.utils import load_cfg
+
 
 def build_index(progress_cb: Optional[Callable[[str, Dict], None]] = None) -> Dict:
     """
@@ -21,8 +21,10 @@ def build_index(progress_cb: Optional[Callable[[str, Dict], None]] = None) -> Di
       - "write_index": {}
       - "done": {"num_files": <int>, "num_chunks": <int>}
     """
+
     def emit(ev, pl=None):
-        if progress_cb: progress_cb(ev, pl or {})
+        if progress_cb:
+            progress_cb(ev, pl or {})
 
     CFG = load_cfg("configs/settings.yaml")
     PROC = pathlib.Path("data/processed")
@@ -40,6 +42,7 @@ def build_index(progress_cb: Optional[Callable[[str, Dict], None]] = None) -> Di
 
     from numpy import vstack
     import numpy as np
+
     idx = DocIndex(CFG["retrieval"]["faiss_index"], CFG["retrieval"]["store_json"])
 
     if not records:
@@ -59,7 +62,10 @@ def build_index(progress_cb: Optional[Callable[[str, Dict], None]] = None) -> Di
         s = b * batch
         e = min(rows_total, s + batch)
         vecs.append(embedder.encode(texts[s:e]))
-        emit("embed_progress", {"batch_idx": b + 1, "batches": batches, "rows_done": e, "rows_total": rows_total})
+        emit(
+            "embed_progress",
+            {"batch_idx": b + 1, "batches": batches, "rows_done": e, "rows_total": rows_total},
+        )
     X = vstack(vecs)
 
     emit("write_index", {})
@@ -69,19 +75,26 @@ def build_index(progress_cb: Optional[Callable[[str, Dict], None]] = None) -> Di
     emit("done", stats)
     return stats
 
+
 if __name__ == "__main__":
+
     def printer(ev, pl):
         if ev == "scan_total":
             print(f"[scan] files={pl.get('files')}")
         elif ev == "scan_file":
             print(f"[scan] {pl.get('i')}/{pl.get('n')} {pl.get('file')}")
         elif ev == "chunk_progress":
-            print(f"[chunk] files {pl.get('files_done')}/{pl.get('files_total')}  chunks={pl.get('chunks')}")
+            print(
+                f"[chunk] files {pl.get('files_done')}/{pl.get('files_total')}  chunks={pl.get('chunks')}"
+            )
         elif ev == "embed_progress":
-            print(f"[embed] batch {pl.get('batch_idx')}/{pl.get('batches')} rows {pl.get('rows_done')}/{pl.get('rows_total')}")
+            print(
+                f"[embed] batch {pl.get('batch_idx')}/{pl.get('batches')} rows {pl.get('rows_done')}/{pl.get('rows_total')}"
+            )
         elif ev == "write_index":
             print("[write] writing index/store")
         elif ev == "done":
             print(f"[done] files={pl.get('num_files')} chunks={pl.get('num_chunks')}")
+
     stats = build_index(progress_cb=printer)
     print(stats)

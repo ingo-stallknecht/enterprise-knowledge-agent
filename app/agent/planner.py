@@ -36,9 +36,11 @@ _WS = re.compile(r"\s+")
 _ENDSPACE = re.compile(r"\s+([,.;:!?])")
 _MULTI_DOTS = re.compile(r"\.{3,}")
 
+
 def _strip_md_links(text: str) -> str:
     # converts [label](url) -> label
     return _LINK.sub(r"\1", text or "")
+
 
 def _smart_preview(text: str, limit: int = 160) -> str:
     if not text:
@@ -52,19 +54,22 @@ def _smart_preview(text: str, limit: int = 160) -> str:
         cut = cut[:i]
     return cut.rstrip() + "…"
 
+
 def _tidy_text(text: str) -> str:
     t = (text or "").strip()
     t = _strip_md_links(t)
-    t = _ENDSPACE.sub(r"\1", t)          # remove spaces before punctuation
-    t = _MULTI_DOTS.sub("…", t)          # normalize long ellipses
-    t = _WS.sub(" ", t)                  # collapse whitespace
+    t = _ENDSPACE.sub(r"\1", t)  # remove spaces before punctuation
+    t = _MULTI_DOTS.sub("…", t)  # normalize long ellipses
+    t = _WS.sub(" ", t)  # collapse whitespace
     return t.strip()
+
 
 def _basename(path: str) -> str:
     try:
         return os.path.basename(path.replace("\\", "/"))
     except Exception:
         return path
+
 
 # ----------------- retrieval -----------------
 def _retrieve(query: str, k: int = 12) -> Tuple[List[Dict], List[Tuple[Dict, float]]]:
@@ -78,6 +83,7 @@ def _retrieve(query: str, k: int = 12) -> Tuple[List[Dict], List[Tuple[Dict, flo
         reranked = raw
     top_records = [r for r, _ in reranked[:k]]
     return top_records, reranked
+
 
 # ----------------- main agent -----------------
 def run_agent(message: str, auto_actions: bool = False) -> Dict:
@@ -100,10 +106,7 @@ def run_agent(message: str, auto_actions: bool = False) -> Dict:
     for r, sc in reranked[:6]:
         src = r.get("source", "")
         prev = _smart_preview(r.get("text", ""), 180)
-        nice_results.append({
-            "source": _basename(src),
-            "preview": prev
-        })
+        nice_results.append({"source": _basename(src), "preview": prev})
     trace.append({"step": 3, "action": "retrieve", "results": nice_results})
 
     # 4) Draft answer (tidy)
@@ -114,14 +117,14 @@ def run_agent(message: str, auto_actions: bool = False) -> Dict:
     # 5) Critic (human-readable)
     gaps, confidence, actions = _critic(tidy_answer, records)
     pretty_critic = {"confidence": float(confidence)}
-    if gaps:     pretty_critic["gaps"] = gaps
-    if actions:  pretty_critic["actions"] = actions
+    if gaps:
+        pretty_critic["gaps"] = gaps
+    if actions:
+        pretty_critic["actions"] = actions
     trace.append({"step": 5, "action": "critic", **pretty_critic})
 
-    return {
-        "answer": tidy_answer,
-        "trace": trace
-    }
+    return {"answer": tidy_answer, "trace": trace}
+
 
 def _critic(answer: str, records: List[Dict]) -> Tuple[List[str], float, List[Dict]]:
     gaps: List[str] = []
@@ -132,31 +135,33 @@ def _critic(answer: str, records: List[Dict]) -> Tuple[List[str], float, List[Di
         gaps.append("Add concrete, role-specific examples (behavioral or scenario-based).")
 
     # prepare a clean upsert draft if content seems generic
-    needs_wiki = ("hiring" in answer.lower() and "values" in answer.lower())
+    needs_wiki = "hiring" in answer.lower() and "values" in answer.lower()
     if needs_wiki:
-        actions.append({
-            "type": "upsert_wiki_draft",
-            "title": "Values Influence Hiring — Example-Rich Guide",
-            "content": (
-                "# Values Influence Hiring — Example-Rich Guide\n\n"
-                "## Purpose\n"
-                "Short, practical reference on weaving CREDIT values into hiring.\n\n"
-                "## Examples by Value\n"
-                "- **Collaboration** — Behavioral: *Tell me about a time you disagreed with a teammate. How did you reach alignment?*  \n"
-                "  Signals: shared ownership, conflict resolution, async artifacts.\n"
-                "- **Results** — Evidence: *Walk me through a measurable outcome you improved.*  \n"
-                "  Signals: baselines, constraints, shipped delta.\n"
-                "- **Efficiency** — Scenario: *Two priorities conflict and time is limited—what do you do first and why?*  \n"
-                "  Signals: prioritization heuristics.\n"
-                "- **DIB** — Inclusion: *Describe a time you turned feedback into a more inclusive process.*  \n"
-                "  Signals: ally behaviors, systemic fixes.\n"
-                "- **Iteration** — *Show where you shipped a rough cut and iterated.*  \n"
-                "  Signals: MVC mindset.\n"
-                "- **Transparency** — *When did you share WIP to unblock others?*  \n"
-                "  Signals: written thinking.\n\n"
-                "## Anti-Patterns\n"
-                "- Rejecting or hiring for vague 'culture fit' — use values alignment with specific evidence instead.\n"
-            )
-        })
+        actions.append(
+            {
+                "type": "upsert_wiki_draft",
+                "title": "Values Influence Hiring — Example-Rich Guide",
+                "content": (
+                    "# Values Influence Hiring — Example-Rich Guide\n\n"
+                    "## Purpose\n"
+                    "Short, practical reference on weaving CREDIT values into hiring.\n\n"
+                    "## Examples by Value\n"
+                    "- **Collaboration** — Behavioral: *Tell me about a time you disagreed with a teammate. How did you reach alignment?*  \n"
+                    "  Signals: shared ownership, conflict resolution, async artifacts.\n"
+                    "- **Results** — Evidence: *Walk me through a measurable outcome you improved.*  \n"
+                    "  Signals: baselines, constraints, shipped delta.\n"
+                    "- **Efficiency** — Scenario: *Two priorities conflict and time is limited—what do you do first and why?*  \n"
+                    "  Signals: prioritization heuristics.\n"
+                    "- **DIB** — Inclusion: *Describe a time you turned feedback into a more inclusive process.*  \n"
+                    "  Signals: ally behaviors, systemic fixes.\n"
+                    "- **Iteration** — *Show where you shipped a rough cut and iterated.*  \n"
+                    "  Signals: MVC mindset.\n"
+                    "- **Transparency** — *When did you share WIP to unblock others?*  \n"
+                    "  Signals: written thinking.\n\n"
+                    "## Anti-Patterns\n"
+                    "- Rejecting or hiring for vague 'culture fit' — use values alignment with specific evidence instead.\n"
+                ),
+            }
+        )
 
     return gaps, conf, actions

@@ -574,55 +574,6 @@ def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
     return cites
 
 
-# ---------- Header ----------
-def _index_health() -> Tuple[str, str]:
-    try:
-        idx = load_or_init_index()
-        ok = (idx.size() > 0) if hasattr(idx, "size") else True
-        if ok:
-            return "<span class='badge badge-ok'>Online</span>", "ok"
-        return "<span class='badge badge-err'>Empty</span>", "err"
-    except Exception:
-        return "<span class='badge badge-err'>Offline</span>", "err"
-
-
-# Determine OpenAI status (plain text only)
-use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
-has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-has_key_secret = bool(st and "OPENAI_API_KEY" in getattr(st, "secrets", {}))
-
-if use_flag and (has_key_env or has_key_secret):
-    openai_status = "ON"
-else:
-    openai_status = "OFF"
-
-
-# Render header (plain text OpenAI status, no emojis, no badges)
-st.markdown(
-    f"""
-    <div class='header-row'>
-        <div>
-            <h3>Enterprise Knowledge Agent</h3>
-            <div class='small'>
-                Ask in plain language. Agent plans, retrieves, answers, cites.
-                &nbsp; <b>OpenAI:</b> {openai_status}
-            </div>
-        </div>
-        <div id='status-slot'></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-_status_slot = st.empty()
-badge_html, _ = _index_health()
-_status_slot.markdown(
-    f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
-    unsafe_allow_html=True,
-)
-
-
-
 # ---------- Bootstrap (optional) ----------
 CURATED = [
     "https://about.gitlab.com/handbook/",
@@ -699,14 +650,97 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
 
+# ---------- Bootstrap corpus & index BEFORE rendering header ----------
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
+    # Try prebuilt index first
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
+        # If no markdown at all, fetch a small subset of GitLab handbook or write seed corpus
         if AUTO_BOOTSTRAP and not have_any_markdown():
             st.info("Fetching a small subset of the GitLab Handbook…")
-            res = bootstrap_gitlab(Prog("Bootstrapping…"))
+            boot_prog = Prog("Bootstrapping…")
+            res = bootstrap_gitlab(boot_prog)
+            # Finish the bootstrap bar cleanly
+            boot_prog.update(label="Bootstrap complete.", value=1.0)
             if not res.get("ok"):
                 write_seed_corpus()
+        # Build or restore index (this has its own progress bar)
         ensure_ready_and_index(force_rebuild=False)
+else:
+    # If index already exists, make sure corpus stats etc. are warmed up
+    ensure_ready_and_index(force_rebuild=False)
+
+
+# ---------- Header ----------
+def _index_health() -> Tuple[str, str]:
+    try:
+        idx = load_or_init_index()
+        ok = (idx.size() > 0) if hasattr(idx, "size") else True
+        if ok:
+            return "<span class='badge badge-ok'>Online</span>", "ok"
+        return "<span class='badge badge-err'>Empty</span>", "err"
+    except Exception:
+        return "<span class='badge badge-err'>Offline</span>", "err"
+
+
+# Determine OpenAI status (plain text only)
+use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
+has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+has_key_secret = False
+try:
+    has_key_secret = "OPENAI_API_KEY" in st.secrets and str(st.secrets["OPENAI_API_KEY"]).strip()
+except Exception:
+    has_key_secret = False
+
+if use_flag and (has_key_env or has_key_secret):
+    openai_status = "ON"
+else:
+    openai_status = "OFF"
+
+st.markdown(
+    f"""
+    <div class='header-row'>
+        <div>
+            <h3>Enterprise Knowledge Agent</h3>
+            <div class='small'>
+                Ask in plain language. Agent plans, retrieves, answers, cites.
+                &nbsp; <b>OpenAI:</b> {openai_status}
+            </div>
+        </div>
+        <div id='status-slot'></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+_status_slot = st.empty()
+badge_html, _ = _index_health()
+_status_slot.markdown(
+    f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
+    unsafe_allow_html=True,
+)
+
+# ---------- Orientation text for new users ----------
+st.markdown(
+    """
+> **How to use this app**
+>
+> - **Ask** – Ask natural-language questions. The app searches a GitLab-inspired handbook plus your wiki pages  
+>   and answers strictly from those documents with citations and a context visualizer.
+> - **Agent** – Describe a task. The agent can  
+>   1) propose and create wiki pages  
+>   2) delete pages (only inside `data/processed/wiki/`)  
+>   3) edit existing wiki pages  
+>   4) answer normally with no side effects  
+>
+> **All create/delete/edit actions require your confirmation.**
+>
+> - **Upload** – Add your own `.md` / `.txt` files; they become part of the knowledge base and show up in answers.
+> - **About** – See an overview of how the system works and browse the Markdown documents that are currently indexed.
+>
+> The initial corpus is based on a small subset of the public GitLab Handbook  
+> (<https://about.gitlab.com/handbook/>), plus any wiki pages and uploads you add here.
+"""
+)
 
 # ---------- Tabs ----------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
@@ -762,7 +796,7 @@ with tab_ask:
                 f"<div class='kpi'>LLM: <b>{llm_meta.get('llm','extractive')}</b></div>",
                 unsafe_allow_html=True,
             )
-            
+
             # Debug / transparency for which backend was used
             debug_reason = llm_meta.get("reason", "")
             debug_error = llm_meta.get("error", "")
@@ -1046,7 +1080,7 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
             model=model,
             temperature=temperature,
             max_tokens=900,
-            messages=[
+            messages[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
@@ -1057,7 +1091,6 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
     except Exception:
         # Any error: signal caller to fall back to the static template
         return None
-
 
 
 # ---------- Wiki actions ----------

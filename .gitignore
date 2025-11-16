@@ -23,3 +23,8 @@ airflow/tmp/
 
 # OS cruft
 .DS_Store
+
+# Allow prebuilt index files (for Streamlit Cloud fast startup)
+!data/index/prebuilt/
+!data/index/prebuilt/handbook.index
+!data/index/prebuilt/docstore.json

@@ -4,10 +4,10 @@ from typing import List, Dict, Tuple
 import os
 import textwrap
 
-# Optional: we try to access Streamlit secrets if available (for Streamlit Cloud)
+# Optional: Streamlit secrets (for Streamlit Cloud)
 try:
     import streamlit as st  # type: ignore
-except Exception:  # running in tests / non-Streamlit context
+except Exception:
     st = None
 
 try:
@@ -18,30 +18,29 @@ except Exception:
 
 
 # -------------------------------------------------------------------
-# Helpers to hydrate env from Streamlit secrets if available
+# Secrets → environment hydration
 # -------------------------------------------------------------------
 
 def _hydrate_openai_env_from_secrets() -> None:
     """
     Ensure OPENAI_API_KEY and USE_OPENAI are set in os.environ if possible.
 
-    This mirrors the logic you used in streamlit_app.py but makes the
-    answerer self-contained, so it also works if imports / init order
-    are different on Streamlit Cloud.
+    This makes the answerer self-contained so it works even if the Streamlit
+    main script didn't set env vars yet (e.g., on Streamlit Cloud).
     """
-    # 1) USE_OPENAI: default to "true" unless explicitly disabled
+    # USE_OPENAI: default to "true" unless explicitly disabled
     if os.environ.get("USE_OPENAI") is None:
-        val = "true"
+        default_val = "true"
         if st is not None:
             try:
                 raw = st.secrets.get("USE_OPENAI", None)
                 if raw is not None:
-                    val = str(raw).lower()
+                    default_val = str(raw).lower()
             except Exception:
                 pass
-        os.environ["USE_OPENAI"] = "true" if val == "true" else "false"
+        os.environ["USE_OPENAI"] = "true" if default_val == "true" else "false"
 
-    # 2) OPENAI_API_KEY: if missing in env, try to pull from secrets
+    # If key already present, don't touch it
     if os.environ.get("OPENAI_API_KEY", "").strip():
         return
 
@@ -50,7 +49,7 @@ def _hydrate_openai_env_from_secrets() -> None:
 
     key = ""
     try:
-        # Direct keys at root
+        # Root-level candidates
         for k in ["OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_APIKEY", "openai_api_key", "openai_key"]:
             if k in st.secrets:
                 v = str(st.secrets[k]).strip()
@@ -58,11 +57,11 @@ def _hydrate_openai_env_from_secrets() -> None:
                     key = v
                     break
 
-        # Nested sections
+        # Section-based
         if not key:
             for section in ("openai", "OPENAI", "llm"):
-                if section in st.secrets and isinstance(st.secrets[section], dict):
-                    sec = st.secrets[section]
+                sec = st.secrets.get(section, None)
+                if isinstance(sec, dict):
                     for k in ("api_key", "API_KEY", "key"):
                         v = str(sec.get(k, "")).strip()
                         if v:
@@ -82,14 +81,13 @@ def _openai_enabled() -> bool:
     Check if we should attempt to use OpenAI.
 
     Conditions:
-    - USE_OPENAI=true (env, with default handled by _hydrate_openai_env_from_secrets)
-    - OPENAI_API_KEY present and non-empty
+    - USE_OPENAI=true (after hydration)
+    - OPENAI_API_KEY non-empty
     - openai client import succeeded
     """
     if _OpenAI is None:
         return False
 
-    # Make sure env is hydrated from secrets if available
     _hydrate_openai_env_from_secrets()
 
     if os.environ.get("USE_OPENAI", "false").lower() != "true":
@@ -102,6 +100,10 @@ def _openai_enabled() -> bool:
     return True
 
 
+# -------------------------------------------------------------------
+# Context building & extractive fallback
+# -------------------------------------------------------------------
+
 def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
     """
     Join retrieved chunks into one context string, truncated by characters.
@@ -112,6 +114,7 @@ def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
         txt = (r.get("text") or "").strip()
         if not txt:
             continue
+        # 2 chars for blank lines
         if total + len(txt) + 2 > max_chars:
             remaining = max_chars - total
             if remaining > 0:
@@ -122,22 +125,30 @@ def _build_context(recs: List[Dict], max_chars: int = 6000) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _extractive_fallback(recs: List[Dict], question: str, max_chars: int) -> Tuple[str, Dict]:
+def _extractive_fallback(recs: List[Dict], question: str, max_chars: int, reason: str, error: str = "") -> Tuple[str, Dict]:
     """
-    Simple extractive answer: just stitch together the most relevant chunks.
+    Simple extractive answer: stitch together the most relevant chunks.
+    Also records why we fell back (for debugging).
     """
     joined = "\n\n".join((r.get("text") or "") for r in recs).strip()
     if not joined:
         ans = "No relevant context found in the current corpus."
     else:
         ans = joined[:max_chars]
+
     meta = {
         "llm": "extractive",
         "used_openai": False,
-        "reason": "fallback_or_disabled",
+        "reason": reason,
     }
+    if error:
+        meta["error"] = error
     return ans, meta
 
+
+# -------------------------------------------------------------------
+# Main entry point
+# -------------------------------------------------------------------
 
 def generate_answer(
     recs: List[Dict],
@@ -155,21 +166,24 @@ def generate_answer(
     Returns:
         (answer_text, meta_dict)
     """
-    # If no context, short early message
+    # No context at all
     if not recs:
-        return (
-            "No relevant context found in the current corpus.",
-            {"llm": "extractive", "used_openai": False, "reason": "no_context"},
+        return _extractive_fallback(
+            recs,
+            question,
+            max_chars,
+            reason="no_context",
         )
 
-    # Try OpenAI first if enabled
+    # Try OpenAI if enabled
     if _openai_enabled():
         try:
-            client = _OpenAI()  # key read from env (OPENAI_API_KEY)
+            # Create client from env
+            client = _OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
 
             model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
             temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))
-            # Rough heuristic: characters ~= 4 tokens, keep some buffer
+            # Very rough: chars ≈ 3 tokens
             max_tokens = min(900, max(200, max_chars // 3))
 
             context = _build_context(recs, max_chars=6000)
@@ -207,10 +221,15 @@ def generate_answer(
 
             text = (resp.choices[0].message.content or "").strip()
             if not text:
-                # If somehow empty, fallback
-                return _extractive_fallback(recs, question, max_chars)
+                # Unexpected empty answer → fallback
+                return _extractive_fallback(
+                    recs,
+                    question,
+                    max_chars,
+                    reason="openai_empty_response",
+                )
 
-            # Hard trim by characters just to be safe
+            # Hard character trim
             if len(text) > max_chars:
                 text = text[: max_chars - 3].rstrip() + "..."
 
@@ -221,9 +240,20 @@ def generate_answer(
             }
             return text, meta
 
-        except Exception:
-            # Any failure: fallback to extractive
-            return _extractive_fallback(recs, question, max_chars)
+        except Exception as e:
+            # IMPORTANT: record the error so we can see it in the UI
+            return _extractive_fallback(
+                recs,
+                question,
+                max_chars,
+                reason="openai_exception",
+                error=str(e),
+            )
 
-    # If OpenAI disabled/unavailable, always use extractive
-    return _extractive_fallback(recs, question, max_chars)
+    # OpenAI disabled / not available
+    return _extractive_fallback(
+        recs,
+        question,
+        max_chars,
+        reason="openai_disabled_or_no_key",
+    )

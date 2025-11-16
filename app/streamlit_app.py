@@ -728,6 +728,20 @@ with tab_ask:
                 f"<div class='kpi'>LLM: <b>{llm_meta.get('llm','extractive')}</b></div>",
                 unsafe_allow_html=True,
             )
+            
+            # Debug / transparency for which backend was used
+            debug_reason = llm_meta.get("reason", "")
+            debug_error = llm_meta.get("error", "")
+            debug_used = "OpenAI" if llm_meta.get("used_openai") else "extractive-only"
+            debug_msg = f"Backend: {debug_used}"
+            if debug_reason:
+                debug_msg += f" · reason: {debug_reason}"
+            if debug_error:
+                # Keep it short-ish; errors can be long
+                short_err = debug_error[:200] + ("…" if len(debug_error) > 200 else "")
+                debug_msg += f" · error: {short_err}"
+            st.caption(debug_msg)
+
             st.markdown("##### Why this answer: Context Visualizer")
             st.markdown(
                 "<div class='cv-legend small'><span>Evidence strength:</span>"

@@ -26,7 +26,7 @@ The system uses the structure and writing style of the publicly available [GitLa
 ---
 
 ## UI Preview  
-![UI Overview](assets/ui.png) 
+![UI Overview](assets/UI.png) 
 
 ---
 

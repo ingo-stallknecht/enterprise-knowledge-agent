@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](#)
 [![CI](https://github.com/ingo-stallknecht/enterprise-knowledge-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ingo-stallknecht/enterprise-knowledge-agent/actions/workflows/ci.yml)
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-5xd4u2vz9w9xrns4fgh9tv.streamlit.app/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://enterprise-knowledge-agent-5bjn6zbkntfrmnhlmanfn8.streamlit.app/)
 ![Last Commit](https://img.shields.io/github/last-commit/ingo-stallknecht/enterprise-knowledge-agent?cacheSeconds=3600)
 
 ---
@@ -97,8 +97,6 @@ If candidate >= current_production:
 Else:
     keep current production as is (do nothing)
 ```
-	
-![MLFlow](assets/mlflow.png)
 
 ## Airflow Weekly Pipeline (Optional, Local)
 
@@ -109,6 +107,28 @@ The DAG `airflow/dags/weekly_ingest_and_train.py` automates:
 - Evaluating retrieval quality  
 - Promoting or rolling back based on metrics  
 
+## Enabling GPT Locally (Optional)
+
+To use GPT-powered answers and wiki drafting, create a .env file in the repo root:
+
+.env is not tracked by Git (it’s in .gitignore).
+Don’t commit your real API key.
+
+Create enterprise-knowledge-agent/.env with e.g.:
+```txt
+# Enable OpenAI usage
+USE_OPENAI=true
+OPENAI_API_KEY=sk-...your-key-here...
+
+# Model and generation settings
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_MAX_INPUT_TOKENS=6000
+OPENAI_MAX_OUTPUT_TOKENS=400
+OPENAI_TEMPERATURE=0.2
+
+# Local daily cost guard (USD, approximate)
+OPENAI_MAX_DAILY_USD=0.80
+```
 ---
 
 ## Quickstart (Local)

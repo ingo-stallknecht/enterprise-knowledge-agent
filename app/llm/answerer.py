@@ -21,17 +21,33 @@ def _get_use_openai_flag() -> bool:
     """
     Decide whether to attempt OpenAI usage.
 
-    Precedence:
-    1) Environment variable USE_OPENAI
-    2) Streamlit secrets USE_OPENAI
-    3) Default: true
+    New behavior:
+    - If an OpenAI key exists (env or secrets) -> always True.
+    - Only if no key exists, look at USE_OPENAI flags.
     """
-    # 1) env
+
+    # If we have a key, we force GPT ON.
+    has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    has_key_secret = False
+
+    if st is not None:
+        try:
+            if "OPENAI_API_KEY" in st.secrets:
+                has_key_secret = bool(str(st.secrets["OPENAI_API_KEY"]).strip())
+        except Exception:
+            pass
+
+    if has_key_env or has_key_secret:
+        return True
+
+    # No key -> fall back to explicit flags
+
+    # 1) env flag
     env_flag = os.environ.get("USE_OPENAI")
     if env_flag is not None:
         return str(env_flag).lower() == "true"
 
-    # 2) secrets
+    # 2) secrets flag
     if st is not None:
         try:
             if "USE_OPENAI" in st.secrets:
@@ -40,8 +56,10 @@ def _get_use_openai_flag() -> bool:
         except Exception:
             pass
 
-    # 3) default
-    return True
+    # 3) default (no key & no explicit flag): False is fine,
+    # generate_answer will fall back to extractive anyway.
+    return False
+
 
 
 def _get_openai_key() -> str:

@@ -41,11 +41,29 @@ except Exception:
     _OpenAI = None
 
 
-def _secret(k, default=None):
+def _secret(k: str, default=None):
+    """
+    Read from Streamlit secrets first (flat or nested), then environment.
+    This supports both:
+      OPENAI_API_KEY = "..."
+    and:
+      [general]
+      OPENAI_API_KEY = "..."
+    """
+    # 1) Try flat secrets
     try:
-        return st.secrets[k]
+        if hasattr(st, "secrets"):
+            if k in st.secrets:
+                return str(st.secrets[k])
+            # 2) Try nested dicts: [section] KEY = "..."
+            for v in st.secrets.values():
+                if isinstance(v, dict) and k in v:
+                    return str(v[k])
     except Exception:
-        return os.environ.get(k, default)
+        pass
+
+    # 3) Fallback to environment
+    return os.environ.get(k, default)
 
 
 # ---------- Writable caches (Streamlit Cloud friendly) ----------
@@ -81,56 +99,40 @@ os.environ.update(
 
 # ---------- OpenAI / LLM ----------
 
-def _secret(k: str, default=None):
-    """
-    Read from Streamlit secrets first (flat or nested), then environment.
-    This supports both:
-      OPENAI_API_KEY = "..."
-    and:
-      [general]
-      OPENAI_API_KEY = "..."
-    """
-    # 1) Try flat secrets
-    try:
-        if hasattr(st, "secrets"):
-            if k in st.secrets:
-                return str(st.secrets[k])
-            # 2) Try nested dicts: [section] KEY = "..."
-            for v in st.secrets.values():
-                if isinstance(v, dict) and k in v:
-                    return str(v[k])
-    except Exception:
-        pass
-
-    # 3) Fallback to environment
-    return os.environ.get(k, default)
-
-
 
 def _init_openai_from_config() -> dict:
     """
     Load OpenAI config from Streamlit secrets / env.
-    - Does NOT overwrite OPENAI_API_KEY with an empty string.
-    - Returns a small diagnostic dict used for the header and backend.
-    """
-    use_flag_raw = _secret("USE_OPENAI", "true")
-    use_flag = str(use_flag_raw).strip().lower() == "true"
 
+    New behavior:
+    - If an OpenAI key exists (secrets or env) -> force use_flag=True and USE_OPENAI="true".
+    - If no key exists, honor USE_OPENAI (default: false).
+    - Never overwrite an existing non-empty key with empty.
+    """
     api_key = _secret("OPENAI_API_KEY", "").strip()
     model = _secret("OPENAI_MODEL", "gpt-4o-mini").strip()
     daily_usd = _secret("OPENAI_MAX_DAILY_USD", "0.80").strip()
 
     has_key = bool(api_key)
 
+    if has_key:
+        # Key present => always enable OpenAI usage
+        use_flag = True
+    else:
+        # No key -> consult USE_OPENAI flag (default: "false")
+        use_flag_raw = _secret("USE_OPENAI", "false")
+        use_flag = str(use_flag_raw).strip().lower() == "true"
+
     # Only set env vars if we actually have a key
-    if use_flag and has_key:
-        os.environ["USE_OPENAI"] = "true"
+    if has_key:
         os.environ["OPENAI_API_KEY"] = api_key
         os.environ["OPENAI_MODEL"] = model
         os.environ["OPENAI_MAX_DAILY_USD"] = daily_usd
+        os.environ["USE_OPENAI"] = "true"  # key presence forces it on
     else:
-        # Keep USE_OPENAI in sync but do NOT clobber an existing key with empty
-        os.environ["USE_OPENAI"] = "false"
+        # No key: do not clobber any existing OPENAI_API_KEY env with empty,
+        # but keep USE_OPENAI in sync with the flag.
+        os.environ["USE_OPENAI"] = "true" if use_flag else "false"
 
     return {
         "use_flag": use_flag,
@@ -152,9 +154,10 @@ def _openai_diag() -> str:
     if use_flag and has_key:
         return f"OpenAI backend: enabled · model {model}"
     if use_flag and not has_key:
-        return "OpenAI backend: enabled · API key missing in secrets"
+        return "OpenAI backend: enabled · API key missing in secrets/env"
+    if not use_flag and has_key:
+        return "OpenAI backend: key found but disabled by flag"
     return "OpenAI backend: disabled"
-
 
 
 # ---------- Settings ----------
@@ -183,7 +186,11 @@ from app.rag.chunker import split_markdown
 from app.llm.answerer import generate_answer
 
 # ---------- Config & dirs ----------
-CFG = load_cfg("configs/settings.yaml") if pathlib.Path("configs/settings.yaml").exists() else {}
+CFG = (
+    load_cfg("configs/settings.yaml")
+    if pathlib.Path("configs/settings.yaml").exists()
+    else {}
+)
 RET = CFG.get("retrieval", {})
 EMB_MODEL = RET.get("embedder_model", "sentence-transformers/all-MiniLM-L6-v2")
 NORMALIZE = bool(RET.get("normalize", True))
@@ -207,7 +214,11 @@ for p in (VEC_DIR, RECS_DIR, MANIFEST.parent):
     p.mkdir(parents=True, exist_ok=True)
 
 # ---------- CSS / UI ----------
-st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="EKA", layout="wide")
+st.set_page_config(
+    page_title="Enterprise Knowledge Agent",
+    page_icon="EKA",
+    layout="wide",
+)
 st.markdown(
     """
  <style>
@@ -254,20 +265,15 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
 
-# Determine OpenAI status (plain text only) – align with _have_openai_client
-try:
-    key_from_secrets = str(st.secrets["OPENAI_API_KEY"])
-    has_key_secret = bool(key_from_secrets.strip())
-except Exception:
-    has_key_secret = False
+# Determine OpenAI status string for the header, based on config.
+_openai_use_flag = _openai_cfg["use_flag"]
+_openai_has_key = _openai_cfg["has_key"]
+_openai_model = _openai_cfg["model"]
 
-has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-
-if has_key_env or has_key_secret:
-    openai_status = "ON"
+if _openai_use_flag and _openai_has_key:
+    openai_status = f"ON (key ✓, model {_openai_model})"
 else:
     openai_status = "OFF"
-
 
 # Render header (plain text OpenAI status, no emojis)
 st.markdown(
@@ -375,8 +381,14 @@ def write_seed_corpus() -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     for name, content in SEED_MD.items():
         (WIKI_DIR / name).write_text(content.strip() + "\n", encoding="utf-8")
-    (PROC_DIR / "values.md").write_text(SEED_MD["values.md"], encoding="utf-8")
-    (PROC_DIR / "communication.md").write_text(SEED_MD["communication.md"], encoding="utf-8")
+    (PROC_DIR / "values.md").write_text(
+        SEED_MD["values.md"],
+        encoding="utf-8",
+    )
+    (PROC_DIR / "communication.md").write_text(
+        SEED_MD["communication.md"],
+        encoding="utf-8",
+    )
     return {"ok": True, "written": len(SEED_MD) + 2}
 
 
@@ -408,7 +420,10 @@ def load_manifest() -> Dict[str, Dict]:
 
 
 def save_manifest(m: Dict[str, Dict]) -> None:
-    MANIFEST.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
+    MANIFEST.write_text(
+        json.dumps(m, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
@@ -416,7 +431,10 @@ def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> Non
     vpath = VEC_DIR / f"{h}.npy"
     rpath = RECS_DIR / f"{h}.json"
     np.save(vpath, vectors.astype("float32"))
-    rpath.write_text(json.dumps(records_list, ensure_ascii=False, indent=0), encoding="utf-8")
+    rpath.write_text(
+        json.dumps(records_list, ensure_ascii=False, indent=0),
+        encoding="utf-8",
+    )
     m = load_manifest()
     m[source] = {"vec": str(vpath), "recs": str(rpath), "n": len(records_list)}
     save_manifest(m)
@@ -468,7 +486,10 @@ def get_models():
     if not DISABLE_RERANKER_BOOT:
         try:
             rer = Reranker(
-                CFG.get("reranker", {}).get("model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+                CFG.get("reranker", {}).get(
+                    "model",
+                    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                )
             )
         except Exception:
             rer = None
@@ -496,9 +517,15 @@ def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
     if X is None:
         return rebuild_index(progress)
     if progress:
-        progress.update(label=f"Assembling {len(records)} chunks…", value=0.35)
+        progress.update(
+            label=f"Assembling {len(records)} chunks…",
+            value=0.35,
+        )
     save_index(X, records, progress)
-    return {"num_files": len(set(r["source"] for r in records)), "num_chunks": len(records)}
+    return {
+        "num_files": len(set(r["source"] for r in records)),
+        "num_chunks": len(records),
+    }
 
 
 def rebuild_index(progress: Optional[Prog] = None) -> Dict:
@@ -511,7 +538,10 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     for i, fp in enumerate(files, 1):
         text = fp.read_text(encoding="utf-8")
         chunks = _split_md(text)
-        recs = [{"text": c["text"], "source": str(fp).replace("\\", "/")} for c in chunks]
+        recs = [
+            {"text": c["text"], "source": str(fp).replace("\\", "/")}
+            for c in chunks
+        ]
         texts = [c["text"] for c in chunks]
         if texts:
             V = emb.encode(texts)
@@ -531,10 +561,17 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     return {"num_files": len(files), "num_chunks": len(all_recs)}
 
 
-def incremental_add(markdown_text: str, source_path: str, progress: Optional[Prog] = None) -> Dict:
+def incremental_add(
+    markdown_text: str,
+    source_path: str,
+    progress: Optional[Prog] = None,
+) -> Dict:
     chunks = _split_md(markdown_text)
     if progress:
-        progress.update(label=f"Chunking {len(chunks)} chunks…", value=0.12)
+        progress.update(
+            label=f"Chunking {len(chunks)} chunks…",
+            value=0.12,
+        )
     texts = [c["text"] for c in chunks]
     if not texts:
         return {"added_chunks": 0}
@@ -552,9 +589,16 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
         return {"added_chunks": len(texts), "appended": True}
     else:
         if progress:
-            progress.update(label="Refreshing index from cache…", value=0.7)
+            progress.update(
+                label="Refreshing index from cache…",
+                value=0.7,
+            )
         stats = rebuild_from_cache(progress)
-        return {"added_chunks": len(texts), "appended": False, "rebuilt": stats}
+        return {
+            "added_chunks": len(texts),
+            "appended": False,
+            "rebuilt": stats,
+        }
 
 
 # ---------- Retrieval & attribution ----------
@@ -634,7 +678,11 @@ def attribute(answer: str, records: List[Dict]) -> List[dict]:
                 "best_rank": j + 1,
                 "score": float(sim[i, j]),
                 "preview": (best.get("text") or "")[:240]
-                + ("…" if len((best.get("text") or "")) > 240 else ""),
+                + (
+                    "…"
+                    if len((best.get("text") or "")) > 240
+                    else ""
+                ),
             }
         )
     return out
@@ -672,7 +720,10 @@ CURATED = [
 
 def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     if requests is None or md is None:
-        return {"ok": False, "error": "requests/markdownify not available"}
+        return {
+            "ok": False,
+            "error": "requests/markdownify not available",
+        }
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PROC_DIR.mkdir(parents=True, exist_ok=True)
     total, ok = len(CURATED), 0
@@ -680,9 +731,14 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
         try:
             if progress:
                 progress.update(
-                    label=f"Fetching {i}/{total}: {url}", value=min(0.15, i / total * 0.15)
+                    label=f"Fetching {i}/{total}: {url}",
+                    value=min(0.15, i / total * 0.15),
                 )
-            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
+            r = requests.get(
+                url,
+                headers={"User-Agent": "EKA-Streamlit/1.0"},
+                timeout=20,
+            )
             r.raise_for_status()
             html = r.text
             slug = url.rstrip("/").split("/")[-1] or "index"
@@ -714,21 +770,45 @@ def copy_prebuilt_if_available() -> bool:
 
 
 def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
-    if USE_PREBUILT and pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
-        return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
+    if (
+        USE_PREBUILT
+        and pathlib.Path(INDEX_PATH).exists()
+        and pathlib.Path(STORE_PATH).exists()
+    ):
+        return {
+            "seeded": False,
+            "rebuilt": False,
+            "stats": corpus_stats(),
+        }
     if force_rebuild:
         prog = Prog("Rebuilding index from cache…")
-        return {"seeded": False, "rebuilt": True, "stats": rebuild_from_cache(prog)}
+        return {
+            "seeded": False,
+            "rebuilt": True,
+            "stats": rebuild_from_cache(prog),
+        }
     if not have_any_markdown():
         write_seed_corpus()
         prog = Prog("Indexing seed corpus…")
         stats = rebuild_index(prog)
-        return {"seeded": True, "rebuilt": True, "stats": stats}
+        return {
+            "seeded": True,
+            "rebuilt": True,
+            "stats": stats,
+        }
     if not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists():
         prog = Prog("Restoring index from cache…")
         stats = rebuild_from_cache(prog)
-        return {"seeded": False, "rebuilt": True, "stats": stats}
-    return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
+        return {
+            "seeded": False,
+            "rebuilt": True,
+            "stats": stats,
+        }
+    return {
+        "seeded": False,
+        "rebuilt": False,
+        "stats": corpus_stats(),
+    }
 
 
 # Initial bootstrap / index build on first cloud load.
@@ -750,7 +830,9 @@ _status_slot.markdown(
 )
 
 # ---------- Tabs ----------
-tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
+tab_ask, tab_agent, tab_upload, tab_about = st.tabs(
+    ["Ask", "Agent", "Upload", "About"]
+)
 
 # ===== ASK =====
 with tab_ask:
@@ -766,7 +848,13 @@ with tab_ask:
             "decision-making?"
         ),
     )
-    max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
+    max_chars = st.slider(
+        "Answer length limit",
+        200,
+        2000,
+        MAX_CHARS_DEFAULT,
+        50,
+    )
     c1, c2 = st.columns(2)
     mode = c1.selectbox(
         "Retrieval mode",
@@ -785,8 +873,14 @@ with tab_ask:
                 recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
-                joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
+                joined = "\n\n".join(
+                    (r.get("text") or "") for r, _ in pairs[:6]
+                ).strip()
+                ans = (
+                    joined[:max_chars]
+                    if joined
+                    else "No relevant context found in the current corpus."
+                )
             st.subheader("Answer")
             st.write(ans)
             m1, m2, m3, m4 = st.columns(4)
@@ -810,13 +904,17 @@ with tab_ask:
             # Debug / transparency for which backend was used
             debug_reason = llm_meta.get("reason", "")
             debug_error = llm_meta.get("error", "")
-            debug_used = "OpenAI" if llm_meta.get("used_openai") else "extractive-only"
+            debug_used = (
+                "OpenAI" if llm_meta.get("used_openai") else "extractive-only"
+            )
             debug_msg = f"Backend: {debug_used}"
             if debug_reason:
                 debug_msg += f" · reason: {debug_reason}"
             if debug_error:
                 # Keep it short-ish; errors can be long
-                short_err = debug_error[:200] + ("…" if len(debug_error) > 200 else "")
+                short_err = debug_error[:200] + (
+                    "…" if len(debug_error) > 200 else ""
+                )
                 debug_msg += f" · error: {short_err}"
             st.caption(debug_msg)
 
@@ -870,11 +968,18 @@ if "agent_state" not in st.session_state:
     }
 
 # Intent regexes (DELETE first, then CREATE, then EDIT)
-DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
-CREATE_PAT = re.compile(
-    r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I
+DELETE_PAT = re.compile(
+    r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$",
+    re.I,
 )
-EDIT_PAT = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
+CREATE_PAT = re.compile(
+    r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b",
+    re.I,
+)
+EDIT_PAT = re.compile(
+    r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$",
+    re.I,
+)
 
 
 def classify_intent(msg: str) -> Tuple[str, Dict]:
@@ -900,7 +1005,9 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
                 flags=re.I,
             )
         title = (title or "").strip().rstrip(".")
-        return "create_wiki", {"title": title[:120] if title else "Untitled"}
+        return "create_wiki", {
+            "title": title[:120] if title else "Untitled",
+        }
 
     # 3) Edit
     em = EDIT_PAT.search(text)
@@ -916,7 +1023,12 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
 def concise_title(title: str) -> str:
     t = (title or "Untitled").strip()
     t = re.sub(r"\?$", "", t)
-    t = re.sub(r"^(create|write|make|draft|add)\s+", "", t, flags=re.I)
+    t = re.sub(
+        r"^(create|write|make|draft|add)\s+",
+        "",
+        t,
+        flags=re.I,
+    )
     if len(t) > 60:
         t = t[:57].rstrip() + "…"
 
@@ -927,7 +1039,9 @@ def concise_title(title: str) -> str:
 
     # Avoid em dash; treat hyphen as separator
     parts = re.split(r"(\s+|\-)", t)
-    t = "".join(_tc_word(w) if not w.isspace() and w != "-" else w for w in parts)
+    t = "".join(
+        _tc_word(w) if not w.isspace() and w != "-" else w for w in parts
+    )
     t = re.sub(r"\s*-\s*", " - ", t)
     return t
 
@@ -950,7 +1064,9 @@ def is_safe_text(title: str, content: str) -> Tuple[bool, str]:
     if len(title) > 120:
         return False, "Title too long."
     if _BLOCK_RE.search(title) or _BLOCK_RE.search(content or ""):
-        return False, "Title or content appears to contain harmful or disallowed content."
+        return False, (
+            "Title or content appears to contain harmful or disallowed content."
+        )
     return True, ""
 
 
@@ -994,13 +1110,20 @@ def _split_sentences_for_points(txt: str) -> List[str]:
     out = []
     for s in _split_sentences(txt or ""):
         s2 = s.strip()
-        if 50 <= len(s2) <= 240 and re.match(r"^[A-Z0-9].*[\.!\?]$", s2) and "http" not in s2:
+        if (
+            50 <= len(s2) <= 240
+            and re.match(r"^[A-Z0-9].*[\.!\?]$", s2)
+            and "http" not in s2
+        ):
             out.append(s2)
     return out
 
 
 def extract_key_points(
-    query: str, pairs: List[Tuple[Dict, float]], emb: Embedder, max_points: int = 5
+    query: str,
+    pairs: List[Tuple[Dict, float]],
+    emb: Embedder,
+    max_points: int = 5,
 ) -> List[str]:
     if not pairs:
         return []
@@ -1016,12 +1139,21 @@ def extract_key_points(
     idxs = np.argsort(-sim)[: max(10, max_points * 3)]
     seen, out = set(), []
     for i in idxs:
-        k = re.sub(r"[^a-z0-9]+", " ", cands[i].lower()).strip()
+        k = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            cands[i].lower(),
+        ).strip()
         if k and k not in seen:
             seen.add(k)
             out.append(cands[i])
-    if not any("time-box" in p.lower() or "time box" in p.lower() for p in out):
-        out.insert(0, "Time-box feedback windows and collect input before the decision deadline.")
+    if not any(
+        "time-box" in p.lower() or "time box" in p.lower() for p in out
+    ):
+        out.insert(
+            0,
+            "Time-box feedback windows and collect input before the decision deadline.",
+        )
     return out[:max_points]
 
 
@@ -1054,8 +1186,11 @@ def _have_openai_client() -> bool:
     return True
 
 
-
-def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:
+def gpt_generate_wiki_md(
+    preferred_title: str,
+    query: str,
+    key_points: List[str],
+) -> Optional[str]:
     """
     Use GPT-4o (or configured model) to draft a wiki page.
 
@@ -1193,7 +1328,9 @@ with tab_agent:
     )
 
     if READ_ONLY:
-        st.info("Read-only mode is ON. Creating, deleting, and editing pages is disabled.")
+        st.info(
+            "Read-only mode is ON. Creating, deleting, and editing pages is disabled."
+        )
 
     state = st.session_state["agent_state"]
 
@@ -1228,10 +1365,22 @@ with tab_agent:
                 else:
                     ensure_ready_and_index(False)
                     query = text if text.endswith("?") else text.rstrip(".") + "?"
-                    recs, pairs, _m = retrieve(query, min(TOP_K, 12), "hybrid", use_reranker=False)
+                    recs, pairs, _m = retrieve(
+                        query,
+                        min(TOP_K, 12),
+                        "hybrid",
+                        use_reranker=False,
+                    )
                     emb, _ = get_models()
-                    points = extract_key_points(query, pairs, emb, max_points=5)
-                    title = concise_title(info.get("title") or "Untitled")
+                    points = extract_key_points(
+                        query,
+                        pairs,
+                        emb,
+                        max_points=5,
+                    )
+                    title = concise_title(
+                        info.get("title") or "Untitled",
+                    )
 
                     draft = gpt_generate_wiki_md(title, query, points)
                     if draft is None or not draft.strip():
@@ -1263,7 +1412,10 @@ with tab_agent:
                     q = (info.get("query") or "").lower()
                     cands = []
                     for p in WIKI_DIR.glob("*.md"):
-                        if q in p.stem.lower() or q in p.name.lower():
+                        if (
+                            q in p.stem.lower()
+                            or q in p.name.lower()
+                        ):
                             cands.append(str(p).replace("\\", "/"))
                     state.update(
                         {
@@ -1279,7 +1431,9 @@ with tab_agent:
                     )
                     if not cands:
                         with agent_result:
-                            st.info("No matching wiki files found in the wiki folder.")
+                            st.info(
+                                "No matching wiki files found in the wiki folder."
+                            )
 
             elif intent == "edit_wiki":
                 if READ_ONLY:
@@ -1289,7 +1443,10 @@ with tab_agent:
                     q = (info.get("query") or "").lower()
                     cands = []
                     for p in WIKI_DIR.glob("*.md"):
-                        if q in p.stem.lower() or q in p.name.lower():
+                        if (
+                            q in p.stem.lower()
+                            or q in p.name.lower()
+                        ):
                             cands.append(str(p).replace("\\", "/"))
                     if not cands:
                         state.update(
@@ -1305,7 +1462,9 @@ with tab_agent:
                             }
                         )
                         with agent_result:
-                            st.info("No matching wiki files found in the wiki folder.")
+                            st.info(
+                                "No matching wiki files found in the wiki folder."
+                            )
                     else:
                         # Let user pick which file to edit in a separate form below
                         state.update(
@@ -1313,8 +1472,11 @@ with tab_agent:
                                 "mode": "edit_proposed",
                                 "edit_candidates": cands,
                                 "edit_selected": cands[0],
-                                "edit_original": pathlib.Path(cands[0]).read_text(
-                                    encoding="utf-8", errors="ignore"
+                                "edit_original": pathlib.Path(
+                                    cands[0]
+                                ).read_text(
+                                    encoding="utf-8",
+                                    errors="ignore",
                                 ),
                                 "delete_candidates": [],
                                 "proposed_title": "",
@@ -1327,16 +1489,28 @@ with tab_agent:
                 # Helpful answer (no side effects)
                 ensure_ready_and_index(False)
                 recs, pairs, meta = retrieve(
-                    text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
+                    text,
+                    TOP_K,
+                    RETRIEVAL_MODE,
+                    USE_RERANKER_DEFAULT,
                 )
                 if len(pairs) == 0:
                     ensure_ready_and_index(True)
                     recs, pairs, meta = retrieve(
-                        text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
+                        text,
+                        TOP_K,
+                        RETRIEVAL_MODE,
+                        USE_RERANKER_DEFAULT,
                     )
-                ans, llm_meta = generate_answer(recs, text, max_chars=900)
+                ans, llm_meta = generate_answer(
+                    recs,
+                    text,
+                    max_chars=900,
+                )
                 if not ans or ans.strip() in {".", ""}:
-                    joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
+                    joined = "\n\n".join(
+                        (r.get("text") or "") for r, _ in pairs[:6]
+                    ).strip()
                     ans = (
                         joined[:900]
                         if joined
@@ -1369,7 +1543,10 @@ with tab_agent:
                 max_chars=120,
             )
             st.code(state["proposed_content"], language="markdown")
-            ok2, why2 = is_safe_text(title_val, state["proposed_content"])
+            ok2, why2 = is_safe_text(
+                title_val,
+                state["proposed_content"],
+            )
             if not ok2:
                 st.error(f"Blocked by safety filter: {why2}")
             c1, c2 = st.columns(2)
@@ -1432,7 +1609,10 @@ with tab_agent:
                     res = agent_apply_delete_wiki(sel)
                     st.success(f"Deleted {res['num_deleted']} file(s).")
                     if res.get("deleted"):
-                        st.code("\n".join(res["deleted"]), language="text")
+                        st.code(
+                            "\n".join(res["deleted"]),
+                            language="text",
+                        )
                     st.session_state["agent_state"] = {
                         "mode": "idle",
                         "proposed_title": "",
@@ -1442,7 +1622,9 @@ with tab_agent:
                         "edit_selected": "",
                         "edit_original": "",
                         "last_message": "",
-                        "last_display": f"Deleted {res['num_deleted']} file(s)",
+                        "last_display": (
+                            f"Deleted {res['num_deleted']} file(s)"
+                        ),
                     }
             elif cancel_delete:
                 st.session_state["agent_state"]["mode"] = "idle"
@@ -1463,16 +1645,25 @@ with tab_agent:
                     "Select file to edit (restricted to data/processed/wiki/)",
                     options=state["edit_candidates"],
                     index=(
-                        max(0, state["edit_candidates"].index(state["edit_selected"]))
+                        max(
+                            0,
+                            state["edit_candidates"].index(
+                                state["edit_selected"]
+                            ),
+                        )
                         if state["edit_selected"] in state["edit_candidates"]
                         else 0
                     ),
                 )
                 # Load content if changed
-                if file_choice != state["edit_selected"] or not state["edit_original"]:
+                if (
+                    file_choice != state["edit_selected"]
+                    or not state["edit_original"]
+                ):
                     try:
                         content_now = pathlib.Path(file_choice).read_text(
-                            encoding="utf-8", errors="ignore"
+                            encoding="utf-8",
+                            errors="ignore",
                         )
                     except Exception:
                         content_now = ""
@@ -1498,9 +1689,14 @@ with tab_agent:
                 if READ_ONLY:
                     st.error("Edit denied: read-only mode is enabled.")
                 else:
-                    res = agent_apply_edit_wiki(state["edit_selected"], edited_text)
+                    res = agent_apply_edit_wiki(
+                        state["edit_selected"],
+                        edited_text,
+                    )
                     if not res.get("edited"):
-                        st.error(f"Edit failed: {res.get('error','unknown error')}")
+                        st.error(
+                            f"Edit failed: {res.get('error','unknown error')}"
+                        )
                     else:
                         st.success("Changes saved and index updated.")
                         st.caption(res.get("path", ""))
@@ -1513,7 +1709,9 @@ with tab_agent:
                             "edit_selected": "",
                             "edit_original": "",
                             "last_message": "",
-                            "last_display": f"Edited {pathlib.Path(res.get('path','')).name}",
+                            "last_display": (
+                                f"Edited {pathlib.Path(res.get('path','')).name}"
+                            ),
                         }
             elif cancel_edit:
                 st.session_state["agent_state"]["mode"] = "idle"
@@ -1538,14 +1736,19 @@ with tab_upload:
             dst.write_text(text, encoding="utf-8")
 
             prog = Prog("Updating index…")
-            res = incremental_add(text, str(dst).replace("\\", "/"), progress=prog)
+            res = incremental_add(
+                text,
+                str(dst).replace("\\", "/"),
+                progress=prog,
+            )
             if res.get("appended", False):
                 st.success(
                     f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md"
                 )
             else:
                 st.success(
-                    f"✅ Refreshed index from cache; added {res['added_chunks']} chunks."
+                    "✅ Refreshed index from cache; "
+                    f"added {res['added_chunks']} chunks."
                 )
 
 # ===== ABOUT =====
@@ -1596,7 +1799,9 @@ with tab_about:
 """
     )
     stats_now = corpus_stats()
-    st.info(f"Corpus stats: {stats_now['files']} files, approximately {stats_now['size_kb']} KB")
+    st.info(
+        f"Corpus stats: {stats_now['files']} files, approximately {stats_now['size_kb']} KB"
+    )
 
     st.markdown("#### Current Markdown files")
     md_list = _list_md_files()
@@ -1604,11 +1809,15 @@ with tab_about:
         st.write("No Markdown files found yet.")
     else:
         for item in md_list:
-            header = f"{item['name']}  ·  approximately {item['kb']} KB  ·  {item['path']}"
+            header = (
+                f"{item['name']}  ·  approximately {item['kb']} KB  ·  {item['path']}"
+            )
             with st.expander(header, expanded=False):
                 if item.get("preview"):
                     st.code(item["preview"], language="markdown")
                     if item.get("truncated"):
-                        st.caption("Preview truncated. The file is longer in full.")
+                        st.caption(
+                            "Preview truncated. The file is longer in full."
+                        )
                 else:
                     st.write("(empty)")

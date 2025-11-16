@@ -79,8 +79,9 @@ os.environ.update(
     }
 )
 
-
 # ---------- OpenAI / LLM ----------
+
+
 def _find_secret_key() -> str:
     candidates = [
         "OPENAI_API_KEY",
@@ -113,7 +114,8 @@ def _find_secret_key() -> str:
 
 # Use st.secrets.USE_OPENAI if present, else env, else "true"
 use_openai_flag = (
-    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower() == "true"
+    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower()
+    == "true"
 )
 os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
 
@@ -195,24 +197,87 @@ for p in (VEC_DIR, RECS_DIR, MANIFEST.parent):
 st.set_page_config(page_title="Enterprise Knowledge Agent", page_icon="EKA", layout="wide")
 st.markdown(
     """
-<style>
-.header-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.badge { border-radius: 999px; padding: 4px 10px; font-size: 0.85rem; border: 1px solid transparent; }
-.badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
-.badge-err { background:#FFF1F1; color:#B42318; border-color:#FECDCA; }
-.kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
-.small{font-size:0.92rem;color:#687076;}
-.cv-legend { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
-.cv-dot { width:10px; height:10px; display:inline-block; border-radius:999px; border:1px solid #d1d5db; }
-.cv-b1 { background:#FEE2E2; } .cv-b2 { background:#FEF9C3; } .cv-b3 { background:#ECFEFF; } .cv-b4 { background:#F0FDF4; }
-.cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px; border-radius:999px; border:1px solid #e5e7eb; font-size: 0.95rem; }
-</style>
-""",
+ <style>
+ .header-row {
+   display:flex;
+   align-items:center;
+   justify-content:space-between;
+   gap:12px;
+ }
+ .badge {
+   border-radius: 999px;
+   padding: 4px 10px;
+   font-size: 0.85rem;
+   border: 1px solid transparent;
+ }
+ .badge-ok  { background:#E8FFF3; color:#05603A; border-color:#ABEFC6; }
+ .badge-err { background:#FFF1F1; color:#B42318; border-color:#FECDCA; }
+ .kpi{padding:8px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#FCFEFF;display:inline-block;margin-right:8px;}
+ .small{font-size:0.92rem;color:#687076;}
+ .cv-legend { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
+ .cv-dot { width:10px; height:10px; display:inline-block; border-radius:999px; border:1px solid #d1d5db; }
+ .cv-b1 { background:#FEE2E2; }
+ .cv-b2 { background:#FEF9C3; }
+ .cv-b3 { background:#ECFEFF; }
+ .cv-b4 { background:#F0FDF4; }
+ .cv-pill { display:inline-block; margin:4px 6px 8px 0; padding:6px 10px;
+            border-radius:999px; border:1px solid #e5e7eb; font-size: 0.95rem; }
+ </style>
+ """,
     unsafe_allow_html=True,
 )
 
+# ---------- Index health helper ----------
+
+
+def _index_health() -> Tuple[str, str]:
+    try:
+        idx = load_or_init_index()
+        ok = (idx.size() > 0) if hasattr(idx, "size") else True
+        if ok:
+            return "<span class='badge badge-ok'>Online</span>", "ok"
+        return "<span class='badge badge-err'>Empty</span>", "err"
+    except Exception:
+        return "<span class='badge badge-err'>Offline</span>", "err"
+
+
+# Determine OpenAI status (plain text only)
+use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
+has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+has_key_secret = bool(st and "OPENAI_API_KEY" in getattr(st, "secrets", {}))
+
+if use_flag and (has_key_env or has_key_secret):
+    openai_status = "ON"
+else:
+    openai_status = "OFF"
+
+# Render header (plain text OpenAI status, no emojis)
+st.markdown(
+    f"""
+    <div class='header-row'>
+        <div>
+            <h3>Enterprise Knowledge Agent</h3>
+            <div class='small'>
+                Ask in plain language. Agent plans, retrieves, answers, cites.
+                &nbsp; <b>OpenAI:</b> {openai_status}
+            </div>
+        </div>
+        <div id='status-slot'></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+# Status slot is filled after index/bootstrapping, so it reflects "Online" correctly
+_status_slot = st.empty()
+_status_slot.markdown(
+    "<div style='display:flex; justify-content:flex-end'>"
+    "<span class='badge badge-err'>Checking index…</span></div>",
+    unsafe_allow_html=True,
+)
 
 # ---------- Progress ----------
+
+
 class Prog:
     """
     Lightweight progress helper that auto-hides itself when done.
@@ -275,13 +340,15 @@ Values are referenced in hiring, onboarding, and performance reviews.
 """,
     "communication.md": """# Communication
 
-Default to asynchronous, documented communication. Prefer issues and documents to meetings. Summaries and decisions
-are captured in writing. For sensitive topics, use appropriate private channels, then write a public summary when possible.
+Default to asynchronous, documented communication. Prefer issues and documents to meetings.
+Summaries and decisions are captured in writing. For sensitive topics, use appropriate private channels,
+then write a public summary when possible.
 """,
     "engineering-management.md": """# Engineering Management
 
-Managers coach iteration (ship small), measurable outcomes, and transparent decision logs. One-on-ones focus on growth,
-feedback, and removing blockers. Managers role-model values and cite them in feedback.
+Managers coach iteration (ship small), measurable outcomes, and transparent decision logs.
+One-on-ones focus on growth, feedback, and removing blockers. Managers role-model values
+and cite them in feedback.
 """,
 }
 
@@ -327,7 +394,6 @@ def save_manifest(m: Dict[str, Dict]) -> None:
 
 
 def save_cache_for_source(source: str, vectors, records_list: List[Dict]) -> None:
-
     h = _hash_source(source)
     vpath = VEC_DIR / f"{h}.npy"
     rpath = RECS_DIR / f"{h}.json"
@@ -357,7 +423,6 @@ def remove_cache_for_sources(sources: List[str]) -> List[str]:
 
 
 def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
-
     m = load_manifest()
     if not m:
         return None, []
@@ -407,7 +472,6 @@ def save_index(X, records, progress: Optional[Prog] = None) -> None:
 
 
 def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
-
     if progress:
         progress.update(label="Loading cached vectors…", value=0.1)
     X, records = concat_cache()
@@ -444,7 +508,6 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     if all_vecs:
         X = np.vstack(all_vecs)
     else:
-
         X = np.zeros((0, 384), dtype="float32")
     save_index(X, all_recs, progress)
     return {"num_files": len(files), "num_chunks": len(all_recs)}
@@ -574,54 +637,6 @@ def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
     return cites
 
 
-# ---------- Header ----------
-def _index_health() -> Tuple[str, str]:
-    try:
-        idx = load_or_init_index()
-        ok = (idx.size() > 0) if hasattr(idx, "size") else True
-        if ok:
-            return "<span class='badge badge-ok'>Online</span>", "ok"
-        return "<span class='badge badge-err'>Empty</span>", "err"
-    except Exception:
-        return "<span class='badge badge-err'>Offline</span>", "err"
-
-
-# Determine OpenAI status (plain text only)
-use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
-has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-has_key_secret = bool(st and "OPENAI_API_KEY" in getattr(st, "secrets", {}))
-
-if use_flag and (has_key_env or has_key_secret):
-    openai_status = "ON"
-else:
-    openai_status = "OFF"
-
-
-# Render header (plain text OpenAI status, no emojis, no badges)
-st.markdown(
-    f"""
-    <div class='header-row'>
-        <div>
-            <h3>Enterprise Knowledge Agent</h3>
-            <div class='small'>
-                Ask in plain language. Agent plans, retrieves, answers, cites.
-                &nbsp; <b>OpenAI:</b> {openai_status}
-            </div>
-        </div>
-        <div id='status-slot'></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-_status_slot = st.empty()
-badge_html, _ = _index_health()
-_status_slot.markdown(
-    f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
-    unsafe_allow_html=True,
-)
-
-
 # ---------- Bootstrap (optional) ----------
 CURATED = [
     "https://about.gitlab.com/handbook/",
@@ -698,6 +713,8 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
 
+# Initial bootstrap / index build on first cloud load.
+# After this, we update the header status slot so it shows "Online" without manual refresh.
 if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
     if not (USE_PREBUILT and copy_prebuilt_if_available()):
         if AUTO_BOOTSTRAP and not have_any_markdown():
@@ -706,6 +723,13 @@ if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists())
             if not res.get("ok"):
                 write_seed_corpus()
         ensure_ready_and_index(force_rebuild=False)
+
+# Now that the index is ready (or at least attempted), refresh the header status badge.
+badge_html, _ = _index_health()
+_status_slot.markdown(
+    f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
+    unsafe_allow_html=True,
+)
 
 # ---------- Tabs ----------
 tab_ask, tab_agent, tab_upload, tab_about = st.tabs(["Ask", "Agent", "Upload", "About"])
@@ -719,7 +743,10 @@ with tab_ask:
     q = st.text_area(
         "Your question",
         height=100,
-        placeholder="For example: What are GitLab’s core values and how do they guide everyday decision-making?",
+        placeholder=(
+            "For example: What are GitLab’s core values and how do they guide everyday "
+            "decision-making?"
+        ),
     )
     max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
     c1, c2 = st.columns(2)
@@ -741,11 +768,7 @@ with tab_ask:
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
             if not ans or ans.strip() in {".", ""}:
                 joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
-                ans = (
-                    joined[:max_chars]
-                    if joined
-                    else "No relevant context found in the current corpus."
-                )
+                ans = joined[:max_chars] if joined else "No relevant context found in the current corpus."
             st.subheader("Answer")
             st.write(ans)
             m1, m2, m3, m4 = st.columns(4)
@@ -802,7 +825,9 @@ with tab_ask:
                 src = row.get("best_source", "")
                 rk = row.get("best_rank", "-")
                 title = f"Top source #{rk}\n{src}\n(score {s:.2f})"
-                pills.append(f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>")
+                pills.append(
+                    f"<span class='cv-pill {bcls(band(s))}' title='{title}'>{sent}</span>"
+                )
             st.markdown("".join(pills), unsafe_allow_html=True)
             st.markdown("#### Sources")
             for c in fmt_citations(pairs, TOP_K):
@@ -828,7 +853,9 @@ if "agent_state" not in st.session_state:
 
 # Intent regexes (DELETE first, then CREATE, then EDIT)
 DELETE_PAT = re.compile(r"^\s*(delete|remove|trash|erase|drop)\b\s+(?P<target>.+)$", re.I)
-CREATE_PAT = re.compile(r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I)
+CREATE_PAT = re.compile(
+    r"\b(create|write|make|add|draft)\b.*\b(wiki|page|article|doc)\b", re.I
+)
 EDIT_PAT = re.compile(r"^\s*(edit|update|modify|change)\b\s+(?P<target>.+)$", re.I)
 
 
@@ -981,8 +1008,6 @@ def extract_key_points(
 
 
 # ---------- GPT-4 wiki drafting ----------
-
-
 def _have_openai_client() -> bool:
     """
     Small helper so the Agent's wiki-drafting logic and the Ask tab
@@ -1069,7 +1094,11 @@ def agent_apply_create_wiki(title: str, content: str) -> Dict:
     created_path = str(dst).replace("\\", "/")
     prog = Prog("Updating index…")
     res = incremental_add(content, created_path, progress=prog)
-    return {"file": f"{slug}.md", "path": created_path, "added_chunks": res.get("added_chunks", 0)}
+    return {
+        "file": f"{slug}.md",
+        "path": created_path,
+        "added_chunks": res.get("added_chunks", 0),
+    }
 
 
 def _is_in_wiki_folder(p: pathlib.Path) -> bool:
@@ -1123,7 +1152,6 @@ def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
     }
 
 
-# ===== Agent tab =====
 with tab_agent:
     st.markdown("**Agent**")
     st.write(
@@ -1135,19 +1163,23 @@ with tab_agent:
     if READ_ONLY:
         st.info("Read-only mode is ON. Creating, deleting, and editing pages is disabled.")
 
-    agent_result = st.container()
     state = st.session_state["agent_state"]
 
-    # Main agent form (Run button stays near input)
+    # Main agent form (Run button stays near input; result will be rendered BELOW the form)
     with st.form("agent_main_form", clear_on_submit=False):
         msg = st.text_area(
             "Goal or task",
             height=110,
-            placeholder="Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear bullet points.; "
-            "delete demo-page.md; edit demo-page.md; or just ask a question.",
+            placeholder=(
+                "Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear "
+                "bullet points.; delete demo-page.md; edit demo-page.md; or just ask a question."
+            ),
             key="agent_msg",
         )
         submitted_run = st.form_submit_button("Run", type="primary")
+
+    # Container for agent results BELOW the form so the textarea does not jump on submit
+    agent_result = st.container()
 
     if submitted_run:
         text = (msg or "").strip()
@@ -1262,10 +1294,14 @@ with tab_agent:
             else:
                 # Helpful answer (no side effects)
                 ensure_ready_and_index(False)
-                recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                recs, pairs, meta = retrieve(
+                    text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
+                )
                 if len(pairs) == 0:
                     ensure_ready_and_index(True)
-                    recs, pairs, meta = retrieve(text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT)
+                    recs, pairs, meta = retrieve(
+                        text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
+                    )
                 ans, llm_meta = generate_answer(recs, text, max_chars=900)
                 if not ans or ans.strip() in {".", ""}:
                     joined = "\n\n".join((r.get("text") or "") for r, _ in pairs[:6]).strip()
@@ -1285,7 +1321,9 @@ with tab_agent:
                     st.write(ans)
                     st.markdown("#### Sources")
                     for c in fmt_citations(pairs, k=min(6, len(pairs))):
-                        label = f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"
+                        label = (
+                            f"Source #{c['rank']} — {c['source']}  ·  score={c['score']:.3f}"
+                        )
                         with st.expander(label, expanded=False):
                             st.write(c["preview"])
 
@@ -1470,10 +1508,13 @@ with tab_upload:
             prog = Prog("Updating index…")
             res = incremental_add(text, str(dst).replace("\\", "/"), progress=prog)
             if res.get("appended", False):
-                st.success(f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md")
+                st.success(
+                    f"✅ Incrementally indexed {res['added_chunks']} chunks from {slug}.md"
+                )
             else:
-                st.success(f"✅ Refreshed index from cache; added {res['added_chunks']} chunks.")
-
+                st.success(
+                    f"✅ Refreshed index from cache; added {res['added_chunks']} chunks."
+                )
 
 # ===== ABOUT =====
 def _list_md_files() -> List[Dict]:

@@ -8,17 +8,8 @@ __pycache__/
 .env.*
 *.env
 
-# Data & artifacts (runtime data ignored)
+# Data & artifacts (don’t commit runtime data)
 data/
-
-# --- Allow prebuilt index files (exception to "data/" ignore) ---
-!data/
-!data/index/
-!data/index/prebuilt/
-!data/index/prebuilt/handbook.index
-!data/index/prebuilt/docstore.json
-
-# MLflow
 mlruns/
 mlflow/mlruns
 mlflow_artifacts/

@@ -12,20 +12,12 @@
 #   - Harmful titles/content are blocked before creation/edit.
 #   - Optional read-only demo mode: EKA_READ_ONLY="true" (disables create/delete/edit).
 
-import sys
-import os
-import pathlib
-import re
-import time
-import tempfile
-import shutil
-import json
-import hashlib
+import sys, os, pathlib, re, time, tempfile, shutil, json, hashlib
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
 import streamlit as st
-from dotenv import load_dotenv  # NEW
+from dotenv import load_dotenv
 
 # --------------------------------------------------
 # Load .env early so local OPENAI_API_KEY / USE_OPENAI are available
@@ -49,11 +41,26 @@ except Exception:
     _OpenAI = None
 
 
-def _secret(k, default=None):
+def _secret(k: str, default=None):
+    """
+    Read from Streamlit secrets first (flat or nested), then environment.
+
+    Supports both:
+      OPENAI_API_KEY = "..."
+    and:
+      [general]
+      OPENAI_API_KEY = "..."
+    """
     try:
-        return st.secrets[k]
+        if hasattr(st, "secrets"):
+            if k in st.secrets:
+                return str(st.secrets[k])
+            for v in st.secrets.values():
+                if isinstance(v, dict) and k in v:
+                    return str(v[k])
     except Exception:
-        return os.environ.get(k, default)
+        pass
+    return os.environ.get(k, default)
 
 
 # ---------- Writable caches (Streamlit Cloud friendly) ----------
@@ -90,32 +97,7 @@ os.environ.update(
 # ---------- OpenAI / LLM ----------
 
 
-def _secret(k: str, default=None):
-    """
-    Read from Streamlit secrets first (flat or nested), then environment.
-    This supports both:
-      OPENAI_API_KEY = "..."
-    and:
-      [general]
-      OPENAI_API_KEY = "..."
-    """
-    # 1) Try flat secrets
-    try:
-        if hasattr(st, "secrets"):
-            if k in st.secrets:
-                return str(st.secrets[k])
-            # 2) Try nested dicts: [section] KEY = "..."
-            for v in st.secrets.values():
-                if isinstance(v, dict) and k in v:
-                    return str(v[k])
-    except Exception:
-        pass
-
-    # 3) Fallback to environment
-    return os.environ.get(k, default)
-
-
-def _init_openai_from_config() -> Dict[str, object]:
+def _init_openai_from_config() -> dict:
     """
     Load OpenAI config from Streamlit secrets / env.
     - Does NOT overwrite OPENAI_API_KEY with an empty string.
@@ -171,7 +153,6 @@ RETRIEVAL_MODE = _secret("EKA_RETRIEVAL_MODE", "hybrid")
 USE_RERANKER_DEFAULT = _secret("EKA_USE_RERANKER", "true").lower() == "true"
 DISABLE_RERANKER_BOOT = _secret("EKA_DISABLE_RERANKER", "false").lower() == "true"
 AUTO_BOOTSTRAP = _secret("EKA_BOOTSTRAP", "true").lower() == "true"
-USE_PREBUILT = _secret("EKA_USE_PREBUILT", "true").lower() == "true"
 
 # Optional read-only (no UI toggle, for demos)
 READ_ONLY = _secret("EKA_READ_ONLY", "false").lower() == "true"
@@ -197,7 +178,6 @@ NORMALIZE = bool(RET.get("normalize", True))
 ALPHA = float(RET.get("hybrid_alpha", 0.6))
 INDEX_PATH = RET.get("faiss_index", "data/index/handbook.index")
 STORE_PATH = RET.get("store_json", "data/index/docstore.json")
-PREBUILT_DIR = pathlib.Path("data/index/prebuilt")
 CHUNK_CFG = CFG.get("chunk", {"max_chars": 1200, "overlap": 150})
 
 ensure_dirs()
@@ -280,7 +260,7 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
 
-# Determine OpenAI status (plain text only) – align with _have_openai_client
+# Determine OpenAI status for header (simple ON/OFF)
 try:
     key_from_secrets = str(st.secrets["OPENAI_API_KEY"])
     has_key_secret = bool(key_from_secrets.strip())
@@ -288,13 +268,9 @@ except Exception:
     has_key_secret = False
 
 has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+openai_status = "ON" if (has_key_env or has_key_secret) else "OFF"
 
-if has_key_env or has_key_secret:
-    openai_status = "ON"
-else:
-    openai_status = "OFF"
-
-# Render header (plain text OpenAI status, no emojis)
+# Render header (plain text OpenAI status)
 st.markdown(
     f"""
     <div class='header-row'>
@@ -324,16 +300,9 @@ _status_slot.markdown(
 class Prog:
     """
     Lightweight progress helper that auto-hides itself when done.
-
-    Usage:
-        prog = Prog("Indexing corpus…")
-        prog.update(label="Embedding files…", value=0.4)
-        ...
-        prog.update(label="Done", value=1.0)  # bar disappears shortly after
     """
 
     def __init__(self, initial_text: str = "Working…"):
-        # Use a container slot so we can later clear the progress bar completely
         self._slot = st.empty()
         self._last = 0.0
         self._text = initial_text
@@ -341,30 +310,23 @@ class Prog:
             self._bar = st.progress(0, text=initial_text)
 
     def update(self, label: Optional[str] = None, value: Optional[float] = None):
-        # Keep last value if none is provided
         if value is None:
             value = self._last
         value = max(0.0, min(float(value), 1.0))
         self._last = value
 
-        # Remember latest label so we can reuse it
         if label is not None:
             self._text = label
 
-        # Update the visible bar
         try:
             self._bar.progress(
                 int(value * 100),
                 text=self._text if label is None else label,
             )
         except Exception:
-            # In case Streamlit changes internals or the bar is gone,
-            # fail silently instead of crashing the app.
             pass
 
-        # Auto-hide when we are basically done
         if value >= 0.999:
-            # tiny pause so users see "Done" briefly
             time.sleep(0.15)
             self._slot.empty()
 
@@ -396,7 +358,7 @@ and cite them in feedback.
 }
 
 
-def write_seed_corpus() -> Dict[str, object]:
+def write_seed_corpus() -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     for name, content in SEED_MD.items():
         (WIKI_DIR / name).write_text(content.strip() + "\n", encoding="utf-8")
@@ -485,7 +447,6 @@ def concat_cache() -> Tuple[Optional["np.ndarray"], List[Dict]]:
     return X.astype("float32"), recs
 
 
-# ---------- Models & Index (helpers) ----------
 def save_index(X, records, progress: Optional[Prog] = None) -> None:
     idx = load_or_init_index()
     if progress:
@@ -495,7 +456,7 @@ def save_index(X, records, progress: Optional[Prog] = None) -> None:
         progress.update(label="Done", value=1.0)
 
 
-def rebuild_index(progress: Optional[Prog] = None) -> Dict[str, object]:
+def rebuild_index(progress: Optional[Prog] = None) -> Dict:
     files = _scan_processed_files()
     if progress:
         progress.update(label=f"Scanning… {len(files)} files", value=0.03)
@@ -525,7 +486,7 @@ def rebuild_index(progress: Optional[Prog] = None) -> Dict[str, object]:
     return {"num_files": len(files), "num_chunks": len(all_recs)}
 
 
-def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict[str, object]:
+def rebuild_from_cache(progress: Optional[Prog] = None) -> Dict:
     if progress:
         progress.update(label="Loading cached vectors…", value=0.1)
     X, records = concat_cache()
@@ -661,7 +622,7 @@ def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
     return cites
 
 
-# ---------- Bootstrap (optional) ----------
+# ---------- Bootstrap (GitLab handbook) ----------
 CURATED = [
     "https://about.gitlab.com/handbook/",
     "https://about.gitlab.com/handbook/values/",
@@ -676,7 +637,7 @@ CURATED = [
 ]
 
 
-def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict[str, object]:
+def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     if requests is None or md is None:
         return {"ok": False, "error": "requests/markdownify not available"}
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -685,9 +646,10 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict[str, object]:
     for i, url in enumerate(CURATED, 1):
         try:
             if progress:
+                # Progress dedicated to fetching: 0.00–0.15
+                frac = i / total if total else 1.0
                 progress.update(
-                    label=f"Fetching {i}/{total}: {url}",
-                    value=min(0.15, i / total * 0.15),
+                    label=f"Fetching {i}/{total}: {url}", value=0.02 + 0.13 * frac
                 )
             r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
             r.raise_for_status()
@@ -702,32 +664,25 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict[str, object]:
     return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
 
 
-def corpus_stats() -> Dict[str, int]:
+def corpus_stats() -> Dict:
     files = list(PROC_DIR.rglob("*.md"))
     n_files = len(files)
     n_bytes = sum((f.stat().st_size for f in files), 0)
     return {"files": n_files, "size_kb": int(n_bytes / 1024)}
 
 
-def copy_prebuilt_if_available() -> bool:
-    pre_faiss = PREBUILT_DIR / pathlib.Path(INDEX_PATH).name
-    pre_store = PREBUILT_DIR / pathlib.Path(STORE_PATH).name
-    if pre_faiss.exists() and pre_store.exists():
-        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
-        shutil.copy2(pre_faiss, INDEX_PATH)
-        shutil.copy2(pre_store, STORE_PATH)
-        return True
-    return False
-
-
-def ensure_ready_and_index(force_rebuild: bool = False) -> Dict[str, object]:
+def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
     """
-    Ensure that:
-    - There is some Markdown corpus on disk (for About + future rebuilds).
-    - The index + docstore exist and are non-empty.
-    - If the index is empty or corrupted, rebuild from cache or corpus.
+    Ensure we have:
+    - Some Markdown in data/processed (via GitLab bootstrap or seed corpus)
+    - A FAISS index + docstore built from that corpus
     """
-    # 1) Ensure we have at least some Markdown corpus on disk
+    if force_rebuild:
+        prog = Prog("Rebuilding index from cache…")
+        stats = rebuild_from_cache(prog)
+        return {"seeded": False, "rebuilt": True, "stats": stats}
+
+    # 1) If no markdown at all, bootstrap GitLab (or seed corpus)
     if not have_any_markdown():
         if AUTO_BOOTSTRAP:
             st.info("Fetching a small subset of the GitLab Handbook…")
@@ -736,40 +691,22 @@ def ensure_ready_and_index(force_rebuild: bool = False) -> Dict[str, object]:
                 write_seed_corpus()
         else:
             write_seed_corpus()
+        prog = Prog("Indexing corpus…")
+        stats = rebuild_index(prog)
+        return {"seeded": True, "rebuilt": True, "stats": stats}
 
-    # 2) Force rebuild (e.g., when retrieval came back empty)
-    if force_rebuild:
-        prog = Prog("Rebuilding index from cache…")
+    # 2) Have markdown files but no index yet → build from cache or full rebuild
+    if not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists():
+        prog = Prog("Restoring index from cache…")
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
-    # 3) If index exists and seems non-empty, keep it
-    if pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists():
-        try:
-            idx = load_or_init_index()
-            if not hasattr(idx, "size") or idx.size() > 0:
-                return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
-        except Exception:
-            # Fall through to rebuild logic below
-            pass
-
-    # 4) Otherwise: try to rebuild from cache, fall back to full rebuild
-    prog = Prog("Restoring index from cache…")
-    stats = rebuild_from_cache(prog)
-    if stats.get("num_chunks", 0) == 0:
-        prog = Prog("Indexing corpus…")
-        stats = rebuild_index(prog)
-    return {"seeded": False, "rebuilt": True, "stats": stats}
+    # 3) Index already exists → just report stats
+    return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
 
 
-# Initial bootstrap / index build on first cloud load.
-# 1) If the main index is missing, try to copy prebuilt.
-if not (pathlib.Path(INDEX_PATH).exists() and pathlib.Path(STORE_PATH).exists()):
-    if USE_PREBUILT:
-        _ = copy_prebuilt_if_available()
-
-# 2) Ensure corpus + index are ready and non-empty.
-ensure_ready_and_index(force_rebuild=False)
+# Ensure corpus + index on first load
+_init_info = ensure_ready_and_index(force_rebuild=False)
 
 # Now that the index is ready (or at least attempted), refresh the header status badge.
 badge_html, _ = _index_health()
@@ -778,15 +715,15 @@ _status_slot.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Tabs ----------
+# ---------- Tabs + high-level explanation ----------
 st.markdown(
     """
-**How to use this app**
+**What you can do here**
 
-- **Ask** – Ask questions in plain language. The app retrieves relevant passages from the corpus and answers *strictly* from them, with citations and a context visualizer.
-- **Agent** – Let the agent propose & create wiki pages, delete pages in `data/processed/wiki/`, edit existing wiki pages, or just answer. All create/delete/edit actions always require your confirmation.
-- **Upload** – Upload your own Markdown or text files. They are saved into the wiki folder and become part of the knowledge base.
-- **About** – See how the system works under the hood and inspect the Markdown files that currently form the corpus.
+- **Ask** – Ask questions about the GitLab Handbook / uploaded docs. The app retrieves passages and answers strictly from them with citations.
+- **Agent** – Let the agent create, delete, or edit wiki pages in `data/processed/wiki/` (always with your confirmation) or just answer.
+- **Upload** – Add your own Markdown / text files to the knowledge base; they become searchable & citable.
+- **About** – See how the system works and inspect the Markdown corpus.
 """
 )
 
@@ -821,7 +758,6 @@ with tab_ask:
             ensure_ready_and_index(False)
             recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
             if len(pairs) == 0:
-                # Something went wrong or index empty -> try a rebuild from cache/corpus
                 ensure_ready_and_index(True)
                 recs, pairs, meta = retrieve(q, TOP_K, mode, use_rr)
             ans, llm_meta = generate_answer(recs, q, max_chars=max_chars)
@@ -856,7 +792,6 @@ with tab_ask:
             if debug_reason:
                 debug_msg += f" · reason: {debug_reason}"
             if debug_error:
-                # Keep it short-ish; errors can be long
                 short_err = debug_error[:200] + ("…" if len(debug_error) > 200 else "")
                 debug_msg += f" · error: {short_err}"
             st.caption(debug_msg)
@@ -928,7 +863,7 @@ def classify_intent(msg: str) -> Tuple[str, Dict]:
         target = target.rstrip(".")
         return "delete_wiki", {"query": target[:200] if target else ""}
 
-    # 2) Create (requires "create/write ... wiki/page/article/doc")
+    # 2) Create
     if CREATE_PAT.search(text):
         m_title = re.search(r"['\"]([^'\"]{3,120})['\"]", text)
         if m_title:
@@ -966,7 +901,6 @@ def concise_title(title: str) -> str:
             return w.lower()
         return w.capitalize()
 
-    # Avoid em dash; treat hyphen as separator
     parts = re.split(r"(\s+|\-)", t)
     t = "".join(_tc_word(w) if not w.isspace() and w != "-" else w for w in parts)
     t = re.sub(r"\s*-\s*", " - ", t)
@@ -1070,16 +1004,10 @@ def extract_key_points(
 def _have_openai_client() -> bool:
     """
     Decide if OpenAI can be used.
-
-    - Prefer OPENAI_API_KEY from st.secrets.
-    - Fall back to environment variable if needed.
-    - Do NOT depend on USE_OPENAI; if you want to
-       disable OpenAI, unset the key instead.
     """
     if _OpenAI is None:
         return False
 
-    # 1) Secrets first
     key = ""
     try:
         key = st.secrets["OPENAI_API_KEY"]
@@ -1090,7 +1018,6 @@ def _have_openai_client() -> bool:
     if not key:
         return False
 
-    # Ensure the env var is set for the OpenAI client
     os.environ["OPENAI_API_KEY"] = key
     return True
 
@@ -1098,9 +1025,6 @@ def _have_openai_client() -> bool:
 def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]) -> Optional[str]:
     """
     Use GPT-4o (or configured model) to draft a wiki page.
-
-    - If OpenAI is not available or anything fails, return None.
-    - Caller falls back to a deterministic template in that case.
     """
     if not _have_openai_client():
         return None
@@ -1122,12 +1046,12 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
     )
 
     try:
-        client = _OpenAI()  # uses OPENAI_API_KEY from env
+        client = _OpenAI()
         model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.2"))
 
         resp = client.chat.completions.create(
-            model="gpt-4o",  # prefer 4o for drafting
+            model="gpt-4o",
             temperature=temperature,
             max_tokens=900,
             messages=[
@@ -1139,7 +1063,6 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
         if text:
             return text
 
-        # Fallback to configured model if 4o returns empty for some reason
         resp2 = client.chat.completions.create(
             model=model,
             temperature=temperature,
@@ -1153,12 +1076,11 @@ def gpt_generate_wiki_md(preferred_title: str, query: str, key_points: List[str]
         return text2 or None
 
     except Exception:
-        # Any error: signal caller to fall back to the static template
         return None
 
 
 # ---------- Wiki actions ----------
-def agent_apply_create_wiki(title: str, content: str) -> Dict[str, object]:
+def agent_apply_create_wiki(title: str, content: str) -> Dict:
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9\-]+", "-", title.lower()).strip("-") or "page"
     dst = WIKI_DIR / f"{slug}.md"
@@ -1181,7 +1103,7 @@ def _is_in_wiki_folder(p: pathlib.Path) -> bool:
         return False
 
 
-def agent_apply_delete_wiki(selected_files: List[str]) -> Dict[str, object]:
+def agent_apply_delete_wiki(selected_files: List[str]) -> Dict:
     deleted_paths: List[str] = []
     for f in selected_files:
         p = pathlib.Path(f)
@@ -1199,8 +1121,7 @@ def agent_apply_delete_wiki(selected_files: List[str]) -> Dict[str, object]:
     return {"deleted": deleted_paths, "num_deleted": len(deleted_paths)}
 
 
-def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict[str, object]:
-    """Edit an existing wiki file, keeping it in the wiki folder, and refresh its vectors only."""
+def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict:
     p = pathlib.Path(path_str)
     if not _is_in_wiki_folder(p):
         return {"edited": False, "error": "File not in wiki folder."}
@@ -1210,11 +1131,9 @@ def agent_apply_edit_wiki(path_str: str, new_content: str) -> Dict[str, object]:
     p.write_text(new_content, encoding="utf-8")
     abs_path = str(p.resolve()).replace("\\", "/")
 
-    # Drop old vectors for that source and rebuild index from remaining cache
     removed = remove_cache_for_sources([abs_path])
     prog = Prog("Updating index…")
     _ = rebuild_from_cache(prog)
-    # Add fresh vectors for the edited file
     res_add = incremental_add(new_content, abs_path, progress=prog)
     return {
         "edited": True,
@@ -1347,7 +1266,6 @@ with tab_agent:
                         with agent_result:
                             st.info("No matching wiki files found in the wiki folder.")
                     else:
-                        # Let user pick which file to edit in a separate form below
                         state.update(
                             {
                                 "mode": "edit_proposed",
@@ -1364,7 +1282,6 @@ with tab_agent:
                         )
 
             else:
-                # Helpful answer (no side effects)
                 ensure_ready_and_index(False)
                 recs, pairs, meta = retrieve(
                     text, TOP_K, RETRIEVAL_MODE, USE_RERANKER_DEFAULT
@@ -1498,7 +1415,6 @@ with tab_agent:
                 st.session_state["agent_state"]["mode"] = "idle"
         else:
             with st.form("agent_edit_confirm", clear_on_submit=False):
-                # Select file to edit
                 file_choice = st.selectbox(
                     "Select file to edit (restricted to data/processed/wiki/)",
                     options=state["edit_candidates"],
@@ -1508,7 +1424,6 @@ with tab_agent:
                         else 0
                     ),
                 )
-                # Load content if changed
                 if file_choice != state["edit_selected"] or not state["edit_original"]:
                     try:
                         content_now = pathlib.Path(file_choice).read_text(
@@ -1589,10 +1504,10 @@ with tab_upload:
                 )
 
 # ===== ABOUT =====
-def _list_md_files() -> List[Dict[str, object]]:
+def _list_md_files() -> List[Dict]:
     files = sorted(PROC_DIR.rglob("*.md"))
     out = []
-    MAX_CHARS = 2000  # show full content for small files, truncate very long ones
+    MAX_CHARS = 2000
     for f in files:
         try:
             text = f.read_text(encoding="utf-8", errors="ignore")
@@ -1601,7 +1516,6 @@ def _list_md_files() -> List[Dict[str, object]]:
         full_text = text.strip()
         truncated = False
         if len(full_text) > MAX_CHARS:
-            # Cut at a line boundary near MAX_CHARS if possible
             snippet = full_text[:MAX_CHARS]
             last_newline = snippet.rfind("\n")
             if last_newline > MAX_CHARS * 0.7:
@@ -1630,8 +1544,8 @@ with tab_about:
 - Question answering strictly from retrieved passages with citations.
 - Agent can create, delete, and edit wiki pages in `data/processed/wiki/` (always with confirmation), or just answer.
 - Vector cache so deletes and edits do not re-embed all files; the index is rebuilt from cached vectors.
-- Prebuilt index support via `data/index/prebuilt/` for faster cold starts.
 - Safety filter on titles and content; destructive actions are restricted to the wiki folder.
+- GitLab Handbook bootstrap on first load to provide a realistic corpus.
 - Documents view below where you can inspect the Markdown files that are currently part of the corpus.
 """
     )

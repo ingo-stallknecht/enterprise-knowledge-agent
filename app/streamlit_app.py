@@ -580,26 +580,24 @@ def _index_health() -> Tuple[str, str]:
         idx = load_or_init_index()
         ok = (idx.size() > 0) if hasattr(idx, "size") else True
         if ok:
-            return "Online", "ok"
-        return "Empty", "err"
+            return "<span class='badge badge-ok'>Online</span>", "ok"
+        return "<span class='badge badge-err'>Empty</span>", "err"
     except Exception:
-        return "Offline", "err"
+        return "<span class='badge badge-err'>Offline</span>", "err"
 
 
-# Determine OpenAI status (plain text, no icons, no symbols)
+# Determine OpenAI status (plain text only)
 use_flag = os.environ.get("USE_OPENAI", "true").lower() == "true"
 has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-has_key_secret = bool(
-    st and "OPENAI_API_KEY" in getattr(st, "secrets", {})
-)
+has_key_secret = bool(st and "OPENAI_API_KEY" in getattr(st, "secrets", {}))
 
 if use_flag and (has_key_env or has_key_secret):
     openai_status = "ON"
 else:
-    openai_status = "OFF (no key)"
+    openai_status = "OFF"
 
 
-# Render header (plain text)
+# Render header (plain text OpenAI status, no emojis, no badges)
 st.markdown(
     f"""
     <div class='header-row'>
@@ -617,11 +615,12 @@ st.markdown(
 )
 
 _status_slot = st.empty()
-badge_text, _ = _index_health()
+badge_html, _ = _index_health()
 _status_slot.markdown(
-    f"<div style='display:flex; justify-content:flex-end; font-size:0.9rem;'>{badge_text}</div>",
+    f"<div style='display:flex; justify-content:flex-end'>{badge_html}</div>",
     unsafe_allow_html=True,
 )
+
 
 
 # ---------- Bootstrap (optional) ----------

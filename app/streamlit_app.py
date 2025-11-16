@@ -1,4 +1,4 @@
-# app/app.py
+# app/streamlit_app.py
 # Streamlit-only Enterprise Knowledge Agent with GPT-4 wiki drafting, safety filter,
 # guarded deletes/edits (wiki folder only), and incremental indexing.
 #
@@ -686,7 +686,7 @@ with tab_ask:
     q = st.text_area(
         "Your question",
         height=100,
-        placeholder="For example: How are values applied in performance reviews?",
+        placeholder="For example: What are GitLab’s core values and how do they guide everyday decision-making?",
     )
     max_chars = st.slider("Answer length limit", 200, 2000, MAX_CHARS_DEFAULT, 50)
     c1, c2 = st.columns(2)
@@ -1063,8 +1063,8 @@ with tab_agent:
         msg = st.text_area(
             "Goal or task",
             height=110,
-            placeholder='Examples: create a wiki page "Values in Performance Reviews"; '
-            'delete values.md; edit values.md; or just ask a question.',
+            placeholder='Examples: Create a wiki page summarizing GitLab’s value of Iteration in clear bullet points.; '
+            'delete demo-page.md; edit demo-page.md; or just ask a question.',
             key="agent_msg",
         )
         submitted_run = st.form_submit_button("Run", type="primary")

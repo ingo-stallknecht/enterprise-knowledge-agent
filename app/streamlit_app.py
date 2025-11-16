@@ -81,67 +81,64 @@ os.environ.update(
 
 # ---------- OpenAI / LLM ----------
 
-
-def _find_secret_key() -> str:
-    candidates = [
-        "OPENAI_API_KEY",
-        "OPENAI_KEY",
-        "OPENAI_APIKEY",
-        "openai_api_key",
-        "openai_key",
-    ]
+def _secret(k: str, default=None):
+    """Read from Streamlit secrets first, then environment, with a safe default."""
     try:
-        for k in candidates:
-            if k in st.secrets:
-                v = str(st.secrets[k]).strip()
-                if v:
-                    return v
-        for section in ("openai", "OPENAI", "llm"):
-            if section in st.secrets and isinstance(st.secrets[section], dict):
-                for k in ("api_key", "API_KEY", "key"):
-                    v = str(st.secrets[section].get(k, "")).strip()
-                    if v:
-                        return v
+        if k in st.secrets:
+            return str(st.secrets[k])
     except Exception:
         pass
-    # Fallback: environment variables (now populated from .env via load_dotenv)
-    for k in candidates:
-        v = str(os.getenv(k, "")).strip()
-        if v:
-            return v
-    return ""
+    return os.environ.get(k, default)
 
 
-# Use st.secrets.USE_OPENAI if present, else env, else "true"
-use_openai_flag = (
-    str(st.secrets.get("USE_OPENAI", os.environ.get("USE_OPENAI", "true"))).lower()
-    == "true"
-)
-os.environ["USE_OPENAI"] = "true" if use_openai_flag else "false"
+def _init_openai_from_config() -> dict:
+    """
+    Load OpenAI config from Streamlit secrets / env.
+    - Does NOT overwrite OPENAI_API_KEY with an empty string.
+    - Returns a small diagnostic dict used for the header and backend.
+    """
+    use_flag_raw = _secret("USE_OPENAI", "true")
+    use_flag = str(use_flag_raw).strip().lower() == "true"
 
-_key = _find_secret_key()
-if _key:
-    os.environ["OPENAI_API_KEY"] = _key
+    api_key = _secret("OPENAI_API_KEY", "").strip()
+    model = _secret("OPENAI_MODEL", "gpt-4o-mini").strip()
+    daily_usd = _secret("OPENAI_MAX_DAILY_USD", "0.80").strip()
 
-# Prefer GPT-4o for wiki drafting; respect user's model elsewhere
-DEFAULT_LLM_MODEL = str(
-    st.secrets.get("OPENAI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
-)
-os.environ["OPENAI_MODEL"] = DEFAULT_LLM_MODEL
-os.environ["OPENAI_MAX_DAILY_USD"] = str(
-    st.secrets.get("OPENAI_MAX_DAILY_USD", os.environ.get("OPENAI_MAX_DAILY_USD", "0.80"))
-)
+    has_key = bool(api_key)
+
+    # Only set env vars if we actually have a key
+    if use_flag and has_key:
+        os.environ["USE_OPENAI"] = "true"
+        os.environ["OPENAI_API_KEY"] = api_key
+        os.environ["OPENAI_MODEL"] = model
+        os.environ["OPENAI_MAX_DAILY_USD"] = daily_usd
+    else:
+        # Keep USE_OPENAI in sync but do NOT clobber an existing key with empty
+        os.environ["USE_OPENAI"] = "false"
+
+    return {
+        "use_flag": use_flag,
+        "has_key": has_key,
+        "model": model,
+        "daily_usd": daily_usd,
+    }
+
+
+_openai_cfg = _init_openai_from_config()
 
 
 def _openai_diag() -> str:
-    use = os.environ.get("USE_OPENAI", "false").lower() == "true"
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
-    model = os.environ.get("OPENAI_MODEL", "")
-    if use and key:
-        return f"OpenAI: ON (key ✓, model {model})"
-    if use and not key:
-        return "OpenAI: ON (key missing)"
-    return "OpenAI: OFF"
+    """Short, honest status line for the header."""
+    use_flag = _openai_cfg["use_flag"]
+    has_key = _openai_cfg["has_key"]
+    model = _openai_cfg["model"]
+
+    if use_flag and has_key:
+        return f"OpenAI backend: enabled · model {model}"
+    if use_flag and not has_key:
+        return "OpenAI backend: enabled · API key missing in secrets"
+    return "OpenAI backend: disabled"
+
 
 
 # ---------- Settings ----------

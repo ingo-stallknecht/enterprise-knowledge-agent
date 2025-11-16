@@ -8,7 +8,7 @@ streamlit==1.38.0
 numpy==1.26.4
 
 # Embeddings / models
-sentence-transformers==2.2.2  # 3.x pulls heavy dependencies, 2.2.2 is lighter & stable
+sentence-transformers==2.2.2  # stable & lighter than 3.x
 
 # App / utilities
 markdownify==0.14.1
@@ -17,6 +17,5 @@ python-dotenv==1.0.1
 pyyaml==6.0.2
 python-slugify==8.0.4
 
-# OpenAI client + tokenization
+# OpenAI client (no tiktoken needed on Cloud)
 openai==1.12.0
-tiktoken==0.6.0

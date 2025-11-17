@@ -1,16 +1,32 @@
 # scripts/promote_or_rollback.py
-import sys, pathlib
-
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
-import argparse, json, shutil, time
+import argparse
+import json
+import shutil
+import sys
+import time
 from pathlib import Path
+from typing import Any, Dict, List
+
 import mlflow
-from app.rag.utils import load_cfg
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.rag.utils import load_cfg  # noqa: E402
 
 CFG = load_cfg("configs/settings.yaml")
 RET = CFG["retrieval"]
 EVAL = CFG.get("eval", {})
-TH = EVAL.get("pass_thresholds", {"retrieval_hit_rate": 0.7, "precision_at_k": 0.35, "mrr": 0.45})
+TH = EVAL.get(
+    "pass_thresholds",
+    {
+        "retrieval_hit_rate": 0.7,
+        "precision_at_k": 0.35,
+        "mrr": 0.45,
+    },
+)
 EXPERIMENT = CFG.get("mlflow", {}).get("experiment", "EKA_RAG")
 
 INDEX_PATH = Path(RET["faiss_index"])
@@ -20,7 +36,8 @@ HISTORY_FILE = IDX_DIR / "history.json"
 PTR_FILE = IDX_DIR / "production_paths.json"
 
 
-def _mlflow_init():
+def _mlflow_init() -> str:
+    """Configure MLflow to use a local file backend and return the tracking URI."""
     abs_uri = Path("mlruns").resolve().as_uri()
     mlflow.set_tracking_uri(abs_uri)
     mlflow.set_experiment(EXPERIMENT)
@@ -28,32 +45,52 @@ def _mlflow_init():
     return abs_uri
 
 
-def load_metrics() -> dict:
+def load_metrics() -> Dict[str, Any]:
+    """Load the latest evaluation metrics from data/eval/metrics.json."""
     p = Path("data/eval/metrics.json")
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
-def read_pointer() -> dict:
-    return json.loads(PTR_FILE.read_text(encoding="utf-8")) if PTR_FILE.exists() else {}
+def read_pointer() -> Dict[str, Any]:
+    """Read the current production pointer (index/store paths)."""
+    if not PTR_FILE.exists():
+        return {}
+    return json.loads(PTR_FILE.read_text(encoding="utf-8"))
 
 
-def write_pointer(index_path: str, store_path: str) -> dict:
-    out = {"index_path": index_path, "store_path": store_path, "updated_at": int(time.time())}
+def write_pointer(index_path: str, store_path: str) -> Dict[str, Any]:
+    """Write the production pointer to disk and return it."""
+    out = {
+        "index_path": index_path,
+        "store_path": store_path,
+        "updated_at": int(time.time()),
+    }
     IDX_DIR.mkdir(parents=True, exist_ok=True)
     PTR_FILE.write_text(json.dumps(out, indent=2), encoding="utf-8")
     return out
 
 
-def read_history() -> list:
-    return json.loads(HISTORY_FILE.read_text(encoding="utf-8")) if HISTORY_FILE.exists() else []
+def read_history() -> List[Dict[str, Any]]:
+    """Read promotion history entries from disk."""
+    if not HISTORY_FILE.exists():
+        return []
+    return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
 
 
-def write_history(entries: list):
+def write_history(entries: List[Dict[str, Any]]) -> None:
+    """Persist the full promotion history."""
     IDX_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_FILE.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
 def create_snapshot() -> Path:
+    """
+    Create a snapshot directory with the current index + docstore.
+
+    Returns the snapshot directory path.
+    """
     ver_dir = IDX_DIR / f"prod_snapshot_{int(time.time())}"
     ver_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(INDEX_PATH, ver_dir / "handbook.index")
@@ -61,28 +98,44 @@ def create_snapshot() -> Path:
     return ver_dir
 
 
-def thresholds_ok(m: dict) -> bool:
-    for k, thr in TH.items():
-        if float(m.get(k, 0.0)) < float(thr):
-            print(f"[promote] FAIL: {k}={m.get(k,0.0):.3f} < {thr:.3f}")
+def thresholds_ok(metrics: Dict[str, Any]) -> bool:
+    """Check if evaluation metrics meet the configured thresholds."""
+    for key, thr in TH.items():
+        val = float(metrics.get(key, 0.0))
+        if val < float(thr):
+            print(f"[promote] FAIL: {key}={val:.3f} < {thr:.3f}")
             return False
     return True
 
 
-def log_common_artifacts():
-    for p in [
+def log_common_artifacts() -> None:
+    """Log key JSON files to the current MLflow run."""
+    artifacts = [
         "data/eval/metrics.json",
         "data/eval/metrics_detailed.json",
         str(PTR_FILE),
         str(HISTORY_FILE),
-    ]:
-        if Path(p).exists():
-            mlflow.log_artifact(p)
+    ]
+    for path_str in artifacts:
+        path = Path(path_str)
+        if path.exists():
+            mlflow.log_artifact(str(path))
 
 
-def promote(force: bool = False):
+def promote(force: bool = False) -> None:
+    """
+    Promote the current index/docstore to 'production' if thresholds pass.
+
+    When successful:
+    - Create a new snapshot under data/index/prod_snapshot_*
+    - Update production_paths.json pointer
+    - Append to history.json
+
+    When thresholds fail (and not forced), do nothing.
+    """
     uri = _mlflow_init()
     metrics = load_metrics()
+
     with mlflow.start_run(run_name=f"promote-{int(time.time())}"):
         mlflow.set_tag("tracking_uri", uri)
         mlflow.log_param("retrieval.embedder_model", RET.get("embedder_model"))
@@ -91,19 +144,23 @@ def promote(force: bool = False):
         mlflow.log_param("eval.k", EVAL.get("k", RET.get("top_k")))
         mlflow.log_param("thresholds", json.dumps(TH))
 
-        for k, v in metrics.items():
-            if isinstance(v, (int, float)):
-                mlflow.log_metric(k, float(v))
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                mlflow.log_metric(key, float(value))
 
         ok = force or thresholds_ok(metrics)
         mlflow.set_tag("action", "promote")
         mlflow.set_tag("thresholds_ok", str(ok).lower())
+
         prev_ptr = read_pointer()
         from_ver = prev_ptr.get("index_path", "")
 
         if ok:
             snap = create_snapshot()
-            new_ptr = write_pointer(str(snap / "handbook.index"), str(snap / "docstore.json"))
+            new_ptr = write_pointer(
+                str(snap / "handbook.index"),
+                str(snap / "docstore.json"),
+            )
             hist = read_history()
             hist.append(
                 {
@@ -114,6 +171,7 @@ def promote(force: bool = False):
                 }
             )
             write_history(hist)
+
             mlflow.set_tag("promotion", "success")
             mlflow.set_tag("from_version", from_ver)
             mlflow.set_tag("to_version", new_ptr["index_path"])
@@ -127,11 +185,18 @@ def promote(force: bool = False):
         log_common_artifacts()
 
 
-def rollback():
+def rollback() -> None:
+    """
+    Roll back the production pointer to the previous snapshot (if any).
+
+    This does NOT delete any snapshot; it only moves the production pointer.
+    """
     uri = _mlflow_init()
+
     with mlflow.start_run(run_name=f"rollback-{int(time.time())}"):
         mlflow.set_tag("tracking_uri", uri)
         mlflow.set_tag("action", "rollback")
+
         hist = read_history()
         if not hist:
             mlflow.set_tag("rollback", "no_history")
@@ -163,7 +228,7 @@ def rollback():
         log_common_artifacts()
 
 
-def main(mode: str, force: bool = False):
+def main(mode: str, force: bool = False) -> None:
     if mode == "promote":
         promote(force=force)
     elif mode == "rollback":
@@ -173,8 +238,16 @@ def main(mode: str, force: bool = False):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["promote", "rollback"], required=True)
-    ap.add_argument("--force", action="store_true", help="Promote even if thresholds fail")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["promote", "rollback"],
+        required=True,
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Promote even if thresholds fail",
+    )
+    args = parser.parse_args()
     main(args.mode, force=args.force)

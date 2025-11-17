@@ -2,20 +2,28 @@
 """
 Evaluates retrieval (hit rate, precision@k, MRR) and logs to MLflow with a local file backend.
 """
+
+import sys
+import pathlib
 import warnings
+
 warnings.filterwarnings(
     "ignore",
     message="`clean_up_tokenization_spaces` was not set",
     category=FutureWarning,
 )
 
-import sys, pathlib
-
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
-import json, time, yaml
-from typing import Dict, List, Tuple
+import json
+import time
 from pathlib import Path
+from typing import Dict, List, Tuple
+
 import mlflow
+import yaml
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.rag.embedder import Embedder
 from app.rag.index import DocIndex
@@ -58,7 +66,9 @@ def source_matches(src: str, keys: List[str]) -> bool:
 
 
 def compute_metrics_for_query(
-    res_topk: List[Tuple[Dict, float]], must_terms: List[str], relevant_sources: List[str]
+    res_topk: List[Tuple[Dict, float]],
+    must_terms: List[str],
+    relevant_sources: List[str],
 ) -> Dict:
     relevant_flags, rr, first_rel_rank = [], 0.0, None
     for i, (rec, _sc) in enumerate(res_topk, start=1):
@@ -80,7 +90,7 @@ def compute_metrics_for_query(
     }
 
 
-def main():
+def main() -> None:
     embedder = Embedder(RET["embedder_model"], RET["normalize"])
     index = DocIndex(RET["faiss_index"], RET["store_json"])
     questions = load_questions(QUESTIONS_FILE)
@@ -93,7 +103,9 @@ def main():
         qv = embedder.encode([qtext])
         pairs = index.query_hybrid(qv, qtext, k=K, alpha=RET.get("hybrid_alpha", 0.6))
         metrics = compute_metrics_for_query(
-            pairs[:K], q.get("must_terms", []), q.get("relevant_sources", [])
+            pairs[:K],
+            q.get("must_terms", []),
+            q.get("relevant_sources", []),
         )
         results.append(
             {
@@ -120,8 +132,14 @@ def main():
 
     out_dir = Path("data/eval")
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    (out_dir / "metrics_detailed.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    (out_dir / "metrics.json").write_text(
+        json.dumps(metrics, indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / "metrics_detailed.json").write_text(
+        json.dumps(results, indent=2),
+        encoding="utf-8",
+    )
     print("[eval] metrics written to data/eval/metrics.json")
     print(metrics)
 
@@ -139,9 +157,9 @@ def main():
         mlflow.log_param("retrieval.hybrid_alpha", RET.get("hybrid_alpha"))
         mlflow.log_param("eval.k", K)
         mlflow.log_param("eval.questions_file", QUESTIONS_FILE)
-        for k, v in metrics.items():
-            if isinstance(v, (int, float)):
-                mlflow.log_metric(k, float(v))
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                mlflow.log_metric(key, float(value))
         mlflow.log_artifact(str(out_dir / "metrics.json"))
         mlflow.log_artifact(str(out_dir / "metrics_detailed.json"))
 

@@ -166,10 +166,7 @@ if __name__ == "__main__":
         elif event == "write_index":
             print("[write] writing index/store")
         elif event == "done":
-            print(
-                f"[done] files={payload.get('num_files')} "
-                f"chunks={payload.get('num_chunks')}"
-            )
+            print(f"[done] files={payload.get('num_files')} " f"chunks={payload.get('num_chunks')}")
 
     result = build_index(progress_cb=printer)
     print(result)

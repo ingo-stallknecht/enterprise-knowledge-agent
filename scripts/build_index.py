@@ -1,5 +1,18 @@
 # scripts/build_index.py
+import sys
 import pathlib
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="`clean_up_tokenization_spaces` was not set",
+    category=FutureWarning,
+)
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.rag.chunker import split_markdown
 from glob import glob
 from typing import Callable, Dict, Optional, List
 

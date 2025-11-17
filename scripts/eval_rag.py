@@ -2,6 +2,13 @@
 """
 Evaluates retrieval (hit rate, precision@k, MRR) and logs to MLflow with a local file backend.
 """
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="`clean_up_tokenization_spaces` was not set",
+    category=FutureWarning,
+)
+
 import sys, pathlib
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))

@@ -526,25 +526,47 @@ def incremental_add(markdown_text: str, source_path: str, progress: Optional[Pro
 
 # ---------- Retrieval & attribution ----------
 def retrieve(query: str, k: int, mode: str, use_reranker: bool):
+    """
+    Retrieve top-k records in the requested mode.
+
+    - "dense": FAISS-only
+    - "sparse": BM25/TF-IDF if available; otherwise falls back to hybrid with alpha=0.0
+    - "hybrid": combined dense + sparse with alpha
+    """
     t0 = time.time()
     emb, rer = get_models()
     qv = emb.encode([query])
     idx = load_or_init_index()
+
+    # --- dense / sparse / hybrid switching with robust sparse fallback ---
     if mode == "dense":
         raw = idx.query_dense(qv, k=max(k, 30))
         meta_mode = "dense"
     elif mode == "sparse":
-        raw = idx.query_sparse(query, k=max(k, 30))
-        meta_mode = "sparse"
+        # New: be defensive in case DocIndex has no sparse implementation
+        if hasattr(idx, "query_sparse"):
+            try:
+                raw = idx.query_sparse(query, k=max(k, 30))
+                meta_mode = "sparse"
+            except Exception:
+                # Fallback: sparse via hybrid with alpha=0.0
+                raw = idx.query_hybrid(qv, query, k=max(k, 30), alpha=0.0)
+                meta_mode = "sparse_fallback"
+        else:
+            # Fallback: behave like a purely sparse weighting in hybrid
+            raw = idx.query_hybrid(qv, query, k=max(k, 30), alpha=0.0)
+            meta_mode = "sparse_fallback"
     else:
         raw = idx.query_hybrid(qv, query, k=max(k, 30), alpha=ALPHA)
         meta_mode = "hybrid"
+
     candidates = [r for r, _ in raw]
     reranked, rerank_used = raw, False
     if use_reranker and rer is not None and candidates:
         pairs = rer.rerank(query, candidates[:30], top_k=max(k, 1))
         reranked = [(rec, sc) for rec, sc in pairs]
         rerank_used = True
+
     top_records = [r for r, _ in reranked[:k]]
     meta = {
         "mode": meta_mode,

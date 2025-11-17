@@ -1,0 +1,26 @@
+name: Auto Empty Commit
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  auto-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Create empty commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git commit --allow-empty -m "chore: automated empty commit"
+
+      - name: Push changes
+        run: |
+          git push

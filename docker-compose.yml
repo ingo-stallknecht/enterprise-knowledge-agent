@@ -38,7 +38,7 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
-      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__EXECUTOR: "SequentialExecutor"
       EKA_REPO: "/repo"
     depends_on:
       - airflow-scheduler
@@ -54,7 +54,7 @@ services:
     container_name: eka-airflow-scheduler
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__EXECUTOR: "SequentialExecutor"
       EKA_REPO: "/repo"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -66,6 +66,8 @@ services:
     container_name: eka-airflow-init
     entrypoint: /bin/bash
     environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: "SequentialExecutor"
       EKA_REPO: "/repo"
     command: -c "pip install -r /repo/requirements-dev.txt && airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
     volumes:

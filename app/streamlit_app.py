@@ -767,8 +767,8 @@ with tab_ask:
     c1, c2 = st.columns(2)
     mode = c1.selectbox(
         "Retrieval mode",
-        ["hybrid", "dense", "sparse"],
-        index=["hybrid", "dense", "sparse"].index(RETRIEVAL_MODE),
+        ["hybrid", "dense"],
+        index=["hybrid", "dense"].index(RETRIEVAL_MODE),
     )
     use_rr = c2.checkbox("Use reranker", value=USE_RERANKER_DEFAULT)
     if st.button("Get answer", type="primary", key="ask_btn"):

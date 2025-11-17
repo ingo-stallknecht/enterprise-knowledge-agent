@@ -140,5 +140,5 @@ streamlit run app/streamlit_app.py
 ```bash
 pip install -r requirements-dev.txt
 bash mlflow/start_mlflow.sh
-docker-compose -f docker-compose-airflow.yml up
+docker-compose -f docker-compose.yml up
 ```

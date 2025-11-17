@@ -11,10 +11,6 @@ services:
       - .env
     environment:
       - VARIANT=${VARIANT:-local}               # local | dbx
-      # Backend-only secrets (set in .env, do NOT commit):
-      # OPENAI_API_KEY, BACKEND_API_TOKEN, AOAI_USE, AZURE_OPENAI_*,
-      # DBX_HOST, DBX_TOKEN, DBX_VS_ENDPOINT, AZURE_BLOB_*
-      # Optional: restrict CORS to your Streamlit URL
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
     volumes:
       - ./:/app
@@ -23,7 +19,7 @@ services:
     image: python:3.11-slim
     container_name: eka-ui
     working_dir: /app
-    command: bash -lc "pip install -r requirements.txt && python -m streamlit run app/streamlit_app.py --server.port 8501 --server.headless true"
+    command: bash -lc "pip install -r /app/requirements.txt && python -m streamlit run app/streamlit_app.py --server.port 8501 --server.headless true"
     ports:
       - "8501:8501"
     env_file:
@@ -43,6 +39,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
       AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      EKA_REPO: "/repo"
     depends_on:
       - airflow-scheduler
     volumes:
@@ -50,7 +47,7 @@ services:
       - ./:/repo
     ports:
       - "8080:8080"
-    command: webserver
+    command: bash -lc "pip install -r /repo/requirements-dev.txt && airflow webserver"
 
   airflow-scheduler:
     image: apache/airflow:2.9.2
@@ -58,26 +55,30 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      EKA_REPO: "/repo"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./:/repo
-    command: scheduler
+    command: bash -lc "pip install -r /repo/requirements-dev.txt && airflow scheduler"
 
   airflow-init:
     image: apache/airflow:2.9.2
     container_name: eka-airflow-init
     entrypoint: /bin/bash
-    command: -c "airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
+    environment:
+      EKA_REPO: "/repo"
+    command: -c "pip install -r /repo/requirements-dev.txt && airflow db init && airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
+      - ./:/repo
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.14.3
     container_name: eka-mlflow
     environment:
-      MLFLOW_TRACKING_URI: file:/repo/mlflow_artifacts
+      MLFLOW_TRACKING_URI: file:/repo/mlruns
     volumes:
       - ./:/repo
-    command: mlflow server --backend-store-uri file:/repo/mlflow_artifacts --default-artifact-root file:/repo/mlflow_artifacts --host 0.0.0.0 --port 5000
+    command: mlflow server --backend-store-uri file:/repo/mlruns --default-artifact-root file:/repo/mlruns --host 0.0.0.0 --port 5000
     ports:
       - "5000:5000"

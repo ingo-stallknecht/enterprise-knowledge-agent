@@ -91,12 +91,7 @@ The system maintains a vector cache that enables:
 Tracks retrieval metrics, index versions, evaluation results, and promotion/rollback decisions.
 
 **Promotion logic:**
-```txt
-If candidate >= current_production:
-    promote candidate to production
-Else:
-    keep current production as is (do nothing)
-```
+If a candidate meets or exceeds the production score, it is promoted; otherwise, production remains unchanged. If a promoted version later underperforms, the system can rollback to a previously validated index.
 
 ## Airflow Weekly Pipeline (Optional, Local)
 

@@ -144,7 +144,7 @@ OPENAI_MAX_INPUT_TOKENS=6000
 OPENAI_MAX_OUTPUT_TOKENS=400
 OPENAI_TEMPERATURE=0.2
 
-# Local daily cost guard (USD, approximate)
+# Local daily cost guard (USD)
 OPENAI_MAX_DAILY_USD=0.80
 ```
 ---

@@ -17,7 +17,7 @@ It ingests Markdown documents, builds semantic search using embeddings and FAISS
 The system runs:
 
 - **Locally:** full functionality (wiki edits, incremental indexing, MLflow, Airflow)
-- **Streamlit Cloud:** stable version for general use
+- **Streamlit Cloud:** fully functional RAG + wiki-editing in safe mode (no MLflow/Airflow)
 
 ### Corpus Source
 
@@ -88,10 +88,33 @@ The system maintains a vector cache that enables:
 
 ## MLflow Tracking (Optional, Local)
 
-Tracks retrieval metrics, index versions, evaluation results, and promotion/rollback decisions.
+The system includes a lightweight evaluation + promotion workflow to ensure retrieval quality improves over time. All evaluation runs log metrics, parameters, and artifacts to a local MLflow file backend (`./mlruns`).
 
-**Promotion logic:**
-If a candidate meets or exceeds the production score, it is promoted; otherwise, production remains unchanged. If a promoted version later underperforms, the system can rollback to a previously validated index.
+### What gets logged
+- Retrieval metrics: Hit Rate, Precision@K, MRR
+- Evaluation inputs and detailed Top-K sources
+- Index/docstore versions and snapshots
+- Promotion or rollback decisions
+- Production pointers (`production_paths.json`) and full history
+
+This creates a reproducible record of how each index version performs.
+
+### Promotion Logic
+After running the evaluation script, the promotion script compares the new metrics
+against quality thresholds defined in `settings.yaml`. If the candidate index
+meets or exceeds all thresholds, it is promoted by:
+
+- Creating a versioned snapshot under `data/index/prod_snapshot_*`
+- Updating the production pointer
+- Appending to `history.json` (full index lineage)
+- Logging the promotion event to MLflow
+
+If thresholds fail, production remains unchanged.  
+At any time you can run `--mode rollback` to restore the previous snapshot, which
+updates only the pointer—no data is deleted.
+
+This workflow acts as a simple CI/CD gate for RAG quality, ensuring that
+index updates are safe, trackable, and reversible.
 
 ## Airflow Weekly Pipeline (Optional, Local)
 

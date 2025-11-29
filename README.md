@@ -109,7 +109,7 @@ meets or exceeds all thresholds, it is promoted by:
 - Appending to `history.json` (full index lineage)
 - Logging the promotion event to MLflow
 
-If thresholds fail, production remains unchanged.  
+If thresholds fail, production remains unchanged.
 At any time you can run `--mode rollback` to restore the previous snapshot, which
 updates only the pointer, no data is deleted.
 

@@ -111,7 +111,7 @@ meets or exceeds all thresholds, it is promoted by:
 
 If thresholds fail, production remains unchanged.  
 At any time you can run `--mode rollback` to restore the previous snapshot, which
-updates only the pointer—no data is deleted.
+updates only the pointer, no data is deleted.
 
 This workflow acts as a simple CI/CD gate for RAG quality, ensuring that
 index updates are safe, trackable, and reversible.

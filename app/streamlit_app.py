@@ -132,6 +132,23 @@ def _init_openai_from_config() -> dict:
 
 _openai_cfg = _init_openai_from_config()
 
+def generate_answer(records, query, max_chars=900):
+    """
+    Wrapper around the core generate_answer that:
+    - Re-reads OpenAI config from secrets/env
+    - Forces USE_OPENAI back to 'true' if we actually have a key
+
+    This makes the Streamlit app robust for long-running sessions where
+    some other part of the code may have flipped USE_OPENAI to 'false'.
+    """
+    cfg = _init_openai_from_config()
+
+    # If we have a valid key and OpenAI is supposed to be on,
+    # force the flag back to "true" for this request.
+    if cfg.get("has_key") and cfg.get("use_flag"):
+        os.environ["USE_OPENAI"] = "true"
+
+    return _base_generate_answer(records, query, max_chars=max_chars)
 
 def _openai_diag() -> str:
     """Short, honest status line for the header."""
@@ -168,7 +185,7 @@ from app.rag.embedder import Embedder
 from app.rag.index import DocIndex
 from app.rag.reranker import Reranker
 from app.rag.chunker import split_markdown
-from app.llm.answerer import generate_answer
+from app.llm.answerer import generate_answer as _base_generate_answer
 
 # ---------- Config & dirs ----------
 CFG = load_cfg("configs/settings.yaml") if pathlib.Path("configs/settings.yaml").exists() else {}

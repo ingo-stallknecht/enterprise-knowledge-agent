@@ -1048,10 +1048,7 @@ def _have_openai_client() -> bool:
         return False
 
     key = ""
-    try:
-        key = st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        key = os.environ.get("OPENAI_API_KEY", "")
+    key = _secret("OPENAI_API_KEY", "")
 
     key = str(key or "").strip()
     if not key:

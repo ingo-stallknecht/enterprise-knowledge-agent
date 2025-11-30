@@ -132,6 +132,7 @@ def _init_openai_from_config() -> dict:
 
 _openai_cfg = _init_openai_from_config()
 
+
 def generate_answer(records, query, max_chars=900):
     """
     Wrapper around the core generate_answer that:
@@ -149,6 +150,7 @@ def generate_answer(records, query, max_chars=900):
         os.environ["USE_OPENAI"] = "true"
 
     return _base_generate_answer(records, query, max_chars=max_chars)
+
 
 def _openai_diag() -> str:
     """Short, honest status line for the header."""

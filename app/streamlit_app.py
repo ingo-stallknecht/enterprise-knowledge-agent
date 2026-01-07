@@ -665,16 +665,16 @@ def fmt_citations(pairs: List[Tuple[Dict, float]], k: int) -> List[dict]:
 
 # ---------- Bootstrap (GitLab handbook) ----------
 CURATED = [
-    "https://about.gitlab.com/handbook/",
-    "https://about.gitlab.com/handbook/values/",
-    "https://about.gitlab.com/handbook/engineering/",
-    "https://about.gitlab.com/handbook/people-group/",
-    "https://about.gitlab.com/handbook/communication/",
-    "https://about.gitlab.com/handbook/product/",
-    "https://about.gitlab.com/handbook/sales/",
-    "https://about.gitlab.com/handbook/marketing/",
-    "https://about.gitlab.com/handbook/leadership/",
-    "https://about.gitlab.com/handbook/engineering/management/",
+    "https://handbook.gitlab.com/handbook/",
+    "https://handbook.gitlab.com/handbook/values/",
+    "https://handbook.gitlab.com/handbook/engineering/",
+    "https://handbook.gitlab.com/handbook/people-group/",
+    "https://handbook.gitlab.com/handbook/communication/",
+    "https://handbook.gitlab.com/handbook/product/",
+    "https://handbook.gitlab.com/handbook/sales/",
+    "https://handbook.gitlab.com/handbook/marketing/",
+    "https://handbook.gitlab.com/handbook/leadership/",
+    "https://handbook.gitlab.com/handbook/engineering/management/",
 ]
 
 
@@ -710,38 +710,72 @@ def corpus_stats() -> Dict:
     return {"files": n_files, "size_kb": int(n_bytes / 1024)}
 
 
-def ensure_ready_and_index(force_rebuild: bool = False) -> Dict:
+def ensure_ready_and_index(
+    force_rebuild: bool = False,
+    force_bootstrap: bool = False,
+    force_full_rebuild: bool = False,
+) -> Dict:
     """
     Ensure we have:
     - Some Markdown in data/processed (via GitLab bootstrap or seed corpus)
     - A FAISS index + docstore built from that corpus
+
+    force_rebuild: rebuild index from cache (fast)
+    force_bootstrap: refetch curated URLs into data/processed
+    force_full_rebuild: rebuild index by re-embedding all processed files (slow but clean)
     """
+    # 0) Optional: force bootstrap now (refetch)
+    seeded = False
+    if force_bootstrap:
+        if AUTO_BOOTSTRAP:
+            st.info("Refetching curated GitLab Handbook pages…")
+            res = bootstrap_gitlab(Prog("Bootstrapping…"))
+            if not res.get("ok"):
+                write_seed_corpus()
+                seeded = True
+        else:
+            write_seed_corpus()
+            seeded = True
+
+        # After bootstrapping, you usually want a full rebuild so changes take effect
+        force_full_rebuild = True
+
+    # 1) Force full rebuild (re-embed everything)
+    if force_full_rebuild:
+        prog = Prog("Rebuilding index (re-embed all files)…")
+        stats = rebuild_index(prog)
+        return {"seeded": seeded, "rebuilt": True, "stats": stats}
+
+    # 2) Force rebuild from cache (fast)
     if force_rebuild:
         prog = Prog("Rebuilding index from cache…")
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
-    # 1) If no markdown at all, bootstrap GitLab (or seed corpus)
+    # 3) Normal path: if no markdown, bootstrap once (or seed)
     if not have_any_markdown():
         if AUTO_BOOTSTRAP:
             st.info("Fetching a small subset of the GitLab Handbook…")
             res = bootstrap_gitlab(Prog("Bootstrapping…"))
             if not res.get("ok"):
                 write_seed_corpus()
+                seeded = True
         else:
             write_seed_corpus()
+            seeded = True
         prog = Prog("Indexing corpus…")
         stats = rebuild_index(prog)
-        return {"seeded": True, "rebuilt": True, "stats": stats}
+        return {"seeded": seeded, "rebuilt": True, "stats": stats}
 
-    # 2) Have markdown files but no index yet → build from cache or full rebuild
+    # 4) Have markdown but index missing → restore from cache
     if not pathlib.Path(INDEX_PATH).exists() or not pathlib.Path(STORE_PATH).exists():
         prog = Prog("Restoring index from cache…")
         stats = rebuild_from_cache(prog)
         return {"seeded": False, "rebuilt": True, "stats": stats}
 
-    # 3) Index already exists → just report stats
+    # 5) Index exists → just report stats
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
+
 
 
 # Ensure corpus + index on first load
@@ -1578,6 +1612,21 @@ with tab_about:
     )
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files, approximately {stats_now['size_kb']} KB")
+    st.markdown("### Maintenance")
+    cA, cB = st.columns(2)
+
+    if cA.button("Force re-bootstrap + full rebuild", type="primary"):
+        # Refetch curated pages and re-embed everything so the new content is actually used.
+        ensure_ready_and_index(force_bootstrap=True, force_full_rebuild=True)
+        st.success("Re-bootstrap complete. Index rebuilt from refreshed corpus.")
+        st.rerun()
+
+    if cB.button("Rebuild index from cache (fast)"):
+        # Useful if you edited/deleted wiki pages and want to refresh quickly.
+        ensure_ready_and_index(force_rebuild=True)
+        st.success("Index rebuilt from cache.")
+        st.rerun()
+
 
     st.markdown("#### Current Markdown files")
     md_list = _list_md_files()

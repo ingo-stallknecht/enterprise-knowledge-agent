@@ -33,6 +33,11 @@ try:
     import requests
 except Exception:
     requests = None
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
+
 
 # For direct GPT calls (wiki drafting)
 try:
@@ -677,30 +682,95 @@ CURATED = [
     "https://handbook.gitlab.com/handbook/engineering/management/",
 ]
 
+def extract_main_html(html: str) -> str:
+    """
+    Try to reduce page chrome and keep the primary content.
+    Works best for handbook.gitlab.com (Docusaurus-ish layouts).
+    """
+    if not html or BeautifulSoup is None:
+        return html or ""
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove obvious non-content sections
+    for tag in soup.select("nav, header, footer, aside, script, style, noscript"):
+        tag.decompose()
+
+    # Prefer semantic containers
+    main = soup.select_one("main")
+    if main:
+        return str(main)
+
+    article = soup.select_one("article")
+    if article:
+        return str(article)
+
+    # Fallback: body
+    body = soup.body
+    return str(body) if body else (html or "")
+
 
 def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
     if requests is None or md is None:
         return {"ok": False, "error": "requests/markdownify not available"}
+
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PROC_DIR.mkdir(parents=True, exist_ok=True)
+
     total, ok = len(CURATED), 0
+    results = []
+
     for i, url in enumerate(CURATED, 1):
         try:
             if progress:
-                # Progress dedicated to fetching: 0.00–0.15
                 frac = i / total if total else 1.0
                 progress.update(label=f"Fetching {i}/{total}: {url}", value=0.02 + 0.13 * frac)
-            r = requests.get(url, headers={"User-Agent": "EKA-Streamlit/1.0"}, timeout=20)
-            r.raise_for_status()
+
+            r = requests.get(
+                url,
+                headers={"User-Agent": "EKA-Streamlit/1.0"},
+                timeout=25,
+                allow_redirects=True,
+            )
+            status = r.status_code
+            final_url = getattr(r, "url", url)
+
+            slug = final_url.rstrip("/").split("/")[-1] or "index"
+
+            if status != 200 or not (r.text or "").strip():
+                results.append({"url": url, "final_url": final_url, "status": status, "ok": False})
+                continue
+
             html = r.text
-            slug = url.rstrip("/").split("/")[-1] or "index"
+
+            # NEW: strip chrome; keep main/article/body content
+            html_main = extract_main_html(html)
+
             (RAW_DIR / f"{slug}.html").write_text(html, encoding="utf-8")
-            (PROC_DIR / f"{slug}.md").write_text(md(html), encoding="utf-8")
+
+            # Markdownify the reduced HTML
+            md_text = md(html_main)
+
+            # NEW: If it still looks like mostly navigation, keep a short diagnostic header
+            if md_text.count("\n") < 30:
+                md_text = (
+                    f"# {slug}\n\n"
+                    f"(Bootstrap warning: extracted content was unusually short. URL: {final_url})\n\n"
+                    + md_text
+                )
+
+            (PROC_DIR / f"{slug}.md").write_text(md_text, encoding="utf-8")
+
             ok += 1
+            results.append({"url": url, "final_url": final_url, "status": status, "ok": True})
             time.sleep(0.02)
-        except Exception:
-            pass
-    return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED)}
+
+        except Exception as e:
+            results.append({"url": url, "final_url": "", "status": None, "ok": False, "error": repr(e)})
+
+    st.session_state["bootstrap_results"] = results
+    return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED), "results": results}
+
 
 
 def corpus_stats() -> Dict:

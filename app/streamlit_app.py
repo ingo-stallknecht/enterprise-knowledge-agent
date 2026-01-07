@@ -682,6 +682,7 @@ CURATED = [
     "https://handbook.gitlab.com/handbook/engineering/management/",
 ]
 
+
 def extract_main_html(html: str) -> str:
     """
     Try to reduce page chrome and keep the primary content.
@@ -766,11 +767,12 @@ def bootstrap_gitlab(progress: Optional[Prog] = None) -> Dict:
             time.sleep(0.02)
 
         except Exception as e:
-            results.append({"url": url, "final_url": "", "status": None, "ok": False, "error": repr(e)})
+            results.append(
+                {"url": url, "final_url": "", "status": None, "ok": False, "error": repr(e)}
+            )
 
     st.session_state["bootstrap_results"] = results
     return {"ok": ok > 0, "downloaded": ok, "total": len(CURATED), "results": results}
-
 
 
 def corpus_stats() -> Dict:
@@ -845,7 +847,6 @@ def ensure_ready_and_index(
 
     # 5) Index exists → just report stats
     return {"seeded": False, "rebuilt": False, "stats": corpus_stats()}
-
 
 
 # Ensure corpus + index on first load
@@ -1682,21 +1683,6 @@ with tab_about:
     )
     stats_now = corpus_stats()
     st.info(f"Corpus stats: {stats_now['files']} files, approximately {stats_now['size_kb']} KB")
-    st.markdown("### Maintenance")
-    cA, cB = st.columns(2)
-
-    if cA.button("Force re-bootstrap + full rebuild", type="primary"):
-        # Refetch curated pages and re-embed everything so the new content is actually used.
-        ensure_ready_and_index(force_bootstrap=True, force_full_rebuild=True)
-        st.success("Re-bootstrap complete. Index rebuilt from refreshed corpus.")
-        st.rerun()
-
-    if cB.button("Rebuild index from cache (fast)"):
-        # Useful if you edited/deleted wiki pages and want to refresh quickly.
-        ensure_ready_and_index(force_rebuild=True)
-        st.success("Index rebuilt from cache.")
-        st.rerun()
-
 
     st.markdown("#### Current Markdown files")
     md_list = _list_md_files()

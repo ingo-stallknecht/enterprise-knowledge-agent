@@ -105,34 +105,30 @@ os.environ.update(
 def _init_openai_from_config() -> dict:
     """
     Load OpenAI config from Streamlit secrets / env.
-    - Does NOT overwrite OPENAI_API_KEY with an empty string.
-    - Returns a small diagnostic dict used for the header and backend.
+    IMPORTANT:
+    - Never flips global os.environ["USE_OPENAI"] to "false" (that can brick OpenAI until reboot).
+    - Never overwrites OPENAI_API_KEY.
+    - Returns effective config for this run.
     """
     use_flag_raw = _secret("USE_OPENAI", "true")
     use_flag = str(use_flag_raw).strip().lower() == "true"
 
-    api_key = _secret("OPENAI_API_KEY", "").strip()
-    model = _secret("OPENAI_MODEL", "gpt-4o-mini").strip()
-    daily_usd = _secret("OPENAI_MAX_DAILY_USD", "0.80").strip()
+    api_key = str(_secret("OPENAI_API_KEY", "") or "").strip()
+    model = str(_secret("OPENAI_MODEL", "gpt-4o-mini") or "").strip()
+    daily_usd = str(_secret("OPENAI_MAX_DAILY_USD", "0.80") or "").strip()
 
     has_key = bool(api_key)
 
-    # Only set env vars if we actually have a key
-    if use_flag and has_key:
-        os.environ["USE_OPENAI"] = "true"
-        os.environ["OPENAI_API_KEY"] = api_key
-        os.environ["OPENAI_MODEL"] = model
-        os.environ["OPENAI_MAX_DAILY_USD"] = daily_usd
-    else:
-        # Keep USE_OPENAI in sync but do NOT clobber an existing key with empty
-        os.environ["USE_OPENAI"] = "false"
-
+    # Do NOT mutate process-wide env flags here.
+    # Only return effective config.
     return {
         "use_flag": use_flag,
         "has_key": has_key,
+        "api_key": api_key,
         "model": model,
         "daily_usd": daily_usd,
     }
+
 
 
 _openai_cfg = _init_openai_from_config()
@@ -140,21 +136,15 @@ _openai_cfg = _init_openai_from_config()
 
 def generate_answer(records, query, max_chars=900):
     """
-    Wrapper around the core generate_answer that:
-    - Re-reads OpenAI config from secrets/env
-    - Forces USE_OPENAI back to 'true' if we actually have a key
-
-    This makes the Streamlit app robust for long-running sessions where
-    some other part of the code may have flipped USE_OPENAI to 'false'.
+    Wrapper that re-reads OpenAI config each request,
+    but does NOT mutate global env flags.
     """
     cfg = _init_openai_from_config()
 
-    # If we have a valid key and OpenAI is supposed to be on,
-    # force the flag back to "true" for this request.
-    if cfg.get("has_key") and cfg.get("use_flag"):
-        os.environ["USE_OPENAI"] = "true"
-
+    # If OpenAI is enabled+key present, let _base_generate_answer decide.
+    # If disabled/missing key, _base_generate_answer should fall back gracefully.
     return _base_generate_answer(records, query, max_chars=max_chars)
+
 
 
 def _openai_diag() -> str:
@@ -284,15 +274,9 @@ def _index_health() -> Tuple[str, str]:
         return "<span class='badge badge-err'>Offline</span>", "err"
 
 
-# Determine OpenAI status for header (simple ON/OFF)
-try:
-    key_from_secrets = str(st.secrets["OPENAI_API_KEY"])
-    has_key_secret = bool(key_from_secrets.strip())
-except Exception:
-    has_key_secret = False
+cfg_now = _init_openai_from_config()
+openai_status = "ON" if (cfg_now.get("use_flag") and cfg_now.get("has_key")) else "OFF"
 
-has_key_env = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-openai_status = "ON" if (has_key_env or has_key_secret) else "OFF"
 
 # Render header (plain text OpenAI status)
 st.markdown(

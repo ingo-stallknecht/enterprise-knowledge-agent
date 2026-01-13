@@ -130,21 +130,16 @@ def _init_openai_from_config() -> dict:
     }
 
 
-
 _openai_cfg = _init_openai_from_config()
 
 
 def generate_answer(records, query, max_chars=900):
     """
-    Wrapper that re-reads OpenAI config each request,
-    but does NOT mutate global env flags.
+    Wrapper that ensures OpenAI config is reloaded each run,
+    without mutating global process state.
     """
-    cfg = _init_openai_from_config()
-
-    # If OpenAI is enabled+key present, let _base_generate_answer decide.
-    # If disabled/missing key, _base_generate_answer should fall back gracefully.
+    _init_openai_from_config()  # intentionally called for freshness
     return _base_generate_answer(records, query, max_chars=max_chars)
-
 
 
 def _openai_diag() -> str:
